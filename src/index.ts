@@ -10,6 +10,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Env } from "./config";
 import { openaiRoutes } from "./routes/openai";
+import { anthropicRoutes } from "./routes/anthropic";
 
 const APP_VERSION = "0.1.0";
 
@@ -47,5 +48,6 @@ app.get("/health", (c) =>
 
 // Route registration (OpenAI / Anthropic adapters).
 app.route("/", openaiRoutes);
+app.route("/", anthropicRoutes);
 
 export default app;
