@@ -12,6 +12,7 @@ import { HTTPException } from "hono/http-exception";
 import type { Env } from "./config";
 import { openaiRoutes } from "./routes/openai";
 import { anthropicRoutes } from "./routes/anthropic";
+import { mcpRoutes } from "./routes/mcp";
 import { classifyNetworkError, formatErrorForUser } from "./lib/errors";
 
 const APP_VERSION = "0.1.0";
@@ -48,9 +49,10 @@ app.get("/health", (c) =>
   }),
 );
 
-// Route registration (OpenAI / Anthropic adapters).
+// Route registration (OpenAI / Anthropic adapters + MCP server).
 app.route("/", openaiRoutes);
 app.route("/", anthropicRoutes);
+app.route("/", mcpRoutes);
 
 /** Decide whether a request path is an Anthropic endpoint (for error format). */
 function isAnthropicPath(path: string): boolean {
