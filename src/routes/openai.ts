@@ -30,6 +30,7 @@ import {
   generateTruncationToolResult,
   generateTruncationUserMessage,
 } from "../lib/truncation";
+import { enhanceKiroErrorText } from "../lib/errors";
 
 export const openaiRoutes = new Hono<{ Bindings: Env }>();
 
@@ -179,8 +180,9 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
   const initial = await doFetch();
   if (initial.status !== 200) {
     const errorText = await initial.text();
+    const enhanced = enhanceKiroErrorText(errorText);
     throw new HTTPException(initial.status as any, {
-      message: `Upstream API error: ${errorText}`,
+      message: `Upstream API error: ${enhanced.userMessage}`,
     });
   }
 

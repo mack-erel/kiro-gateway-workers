@@ -30,6 +30,7 @@ import {
   generateTruncationToolResult,
   generateTruncationUserMessage,
 } from "../lib/truncation";
+import { enhanceKiroErrorText } from "../lib/errors";
 
 export const anthropicRoutes = new Hono<{ Bindings: Env }>();
 
@@ -167,7 +168,8 @@ anthropicRoutes.post("/v1/messages", async (c) => {
   const initial = await doFetch();
   if (initial.status !== 200) {
     const errorText = await initial.text();
-    return c.json(anthropicError("api_error", errorText), initial.status as any);
+    const enhanced = enhanceKiroErrorText(errorText);
+    return c.json(anthropicError("api_error", enhanced.userMessage), initial.status as any);
   }
 
   const streamArgs = {

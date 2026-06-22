@@ -8,9 +8,11 @@
  */
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { HTTPException } from "hono/http-exception";
 import type { Env } from "./config";
 import { openaiRoutes } from "./routes/openai";
 import { anthropicRoutes } from "./routes/anthropic";
+import { classifyNetworkError, formatErrorForUser } from "./lib/errors";
 
 const APP_VERSION = "0.1.0";
 
@@ -49,5 +51,25 @@ app.get("/health", (c) =>
 // Route registration (OpenAI / Anthropic adapters).
 app.route("/", openaiRoutes);
 app.route("/", anthropicRoutes);
+
+/** Decide whether a request path is an Anthropic endpoint (for error format). */
+function isAnthropicPath(path: string): boolean {
+  return path.startsWith("/v1/messages");
+}
+
+// Central error handler: HTTPException passes through; everything else is
+// classified as a transport/network error and rendered in the right format.
+app.onError((err, c) => {
+  if (err instanceof HTTPException) {
+    return err.getResponse();
+  }
+  const info = classifyNetworkError(err);
+  const format = isAnthropicPath(c.req.path) ? "anthropic" : "openai";
+  return c.json(formatErrorForUser(info, format), info.suggestedHttpCode as any);
+});
+
+app.notFound((c) =>
+  c.json({ error: { message: "Not found", type: "invalid_request_error" } }, 404),
+);
 
 export default app;
