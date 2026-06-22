@@ -4,12 +4,20 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-06-01",
   "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "routes": [{ "pattern": "kiro-api.static.mov", "custom_domain": true }],
+  "placement": { "mode": "smart" },
   "observability": {
-    "enabled": true,
-    "head_sampling_rate": 1
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+    },
+    "traces": {
+      "enabled": true,
+    },
   },
   "limits": {
-    "cpu_ms": 300000
+    "cpu_ms": 300000,
   },
   "vars": {
     "KIRO_REGION": "us-east-1",
@@ -28,13 +36,6 @@
     "MODEL_CACHE_TTL": "3600",
     "LOG_LEVEL": "INFO",
     "DEBUG_STREAM_EVENTS": "false",
-    "DEBUG_BODIES": "false"
+    "DEBUG_BODIES": "false",
   },
-  "kv_namespaces": [
-    {
-      "binding": "MODELS_KV",
-      "id": "PLACEHOLDER_REPLACE_WITH_REAL_ID",
-      "preview_id": "PLACEHOLDER_REPLACE_WITH_REAL_ID"
-    }
-  ]
 }
