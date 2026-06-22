@@ -8,10 +8,12 @@
  */
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import type { Env } from "./config";
+import { openaiRoutes } from "./routes/openai";
 
 const APP_VERSION = "0.1.0";
 
-const app = new Hono();
+const app = new Hono<{ Bindings: Env }>();
 
 // CORS: allow all origins (browser clients + preflight OPTIONS), mirroring the
 // original gateway's permissive policy.
@@ -43,6 +45,7 @@ app.get("/health", (c) =>
   }),
 );
 
-// Route registration (OpenAI / Anthropic adapters) is wired up in later commits.
+// Route registration (OpenAI / Anthropic adapters).
+app.route("/", openaiRoutes);
 
 export default app;
