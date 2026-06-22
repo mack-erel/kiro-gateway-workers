@@ -1,0 +1,29 @@
+{
+  "name": "kiro-gateway-workers",
+  "version": "0.1.0",
+  "description": "OpenAI/Anthropic-compatible proxy gateway for the Kiro API (AWS CodeWhisperer backend), running on Cloudflare Workers + Hono. API-key passthrough only.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "hono": "^4.6.14",
+    "js-tiktoken": "^1.0.15",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.5.40",
+    "@cloudflare/workers-types": "^4.20241218.0",
+    "@hono/zod-validator": "^0.4.2",
+    "typescript": "^5.7.2",
+    "vitest": "2.1.8",
+    "wrangler": "^3.95.0"
+  }
+}

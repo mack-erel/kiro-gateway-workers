@@ -1,0 +1,38 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kiro-gateway-workers",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "limits": {
+    "cpu_ms": 300000
+  },
+  "vars": {
+    "KIRO_REGION": "us-east-1",
+    "FIRST_TOKEN_TIMEOUT": "15",
+    "FIRST_TOKEN_MAX_RETRIES": "3",
+    "STREAMING_READ_TIMEOUT": "300",
+    "FAKE_REASONING_ENABLED": "true",
+    "FAKE_REASONING_HANDLING": "as_reasoning_content",
+    "FAKE_REASONING_MAX_TOKENS": "4000",
+    "FAKE_REASONING_BUDGET_CAP": "10000",
+    "TRUNCATION_RECOVERY": "true",
+    "WEB_SEARCH_ENABLED": "true",
+    "KIRO_MAX_PAYLOAD_BYTES": "600000",
+    "AUTO_TRIM_PAYLOAD": "false",
+    "TOOL_DESCRIPTION_MAX_LENGTH": "10000",
+    "MODEL_CACHE_TTL": "3600",
+    "LOG_LEVEL": "INFO"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "MODELS_KV",
+      "id": "PLACEHOLDER_REPLACE_WITH_REAL_ID",
+      "preview_id": "PLACEHOLDER_REPLACE_WITH_REAL_ID"
+    }
+  ]
+}
