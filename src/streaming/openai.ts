@@ -31,6 +31,7 @@ import {
   saveContentTruncation,
 } from "../lib/truncation";
 import type { KiroAuthContext } from "../types";
+import type { AuditLogger } from "../lib/auditLog";
 
 const sse = (obj: unknown): string => `data: ${JSON.stringify(obj)}\n\n`;
 
@@ -44,6 +45,7 @@ export interface OpenAIStreamArgs {
   requestMessages?: Record<string, any>[] | null;
   requestTools?: Record<string, any>[] | null;
   toolNameMap?: Record<string, string>;
+  audit?: AuditLogger;
 }
 
 /**
@@ -85,6 +87,7 @@ export async function* streamKiroToOpenAI(
     firstTokenTimeoutMs,
     true,
     args.toolNameMap,
+    args.audit,
   )) {
     if (event.type === "content" && event.content) {
       fullContent += event.content;

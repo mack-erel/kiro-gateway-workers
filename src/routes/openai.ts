@@ -31,6 +31,7 @@ import {
   generateTruncationUserMessage,
 } from "../lib/truncation";
 import { enhanceKiroErrorText } from "../lib/errors";
+import { AuditLogger } from "../lib/auditLog";
 
 export const openaiRoutes = new Hono<{ Bindings: Env }>();
 
@@ -117,10 +118,13 @@ openaiRoutes.get("/v1/models", async (c) => {
 // POST /v1/chat/completions
 openaiRoutes.post("/v1/chat/completions", async (c) => {
   const config = loadConfig(c.env);
+  const audit = new AuditLogger(config);
   const auth = authenticate(c, false, config.proxyApiKey);
+  await audit.auth(auth.token, auth.isPassthrough ? "passthrough" : "proxy");
 
   // Only passthrough is supported by this gateway.
   if (!auth.isPassthrough) {
+    audit.rejected(401, "non-passthrough token");
     throw new HTTPException(401, {
       message: "Provide a Kiro API key (ksk_*) as the Bearer token.",
     });
@@ -129,9 +133,16 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
   const raw = await c.req.json();
   const parsed = chatCompletionRequestSchema.safeParse(raw);
   if (!parsed.success) {
+    audit.rejected(422, "schema validation failed");
     return c.json({ detail: parsed.error.issues }, 422);
   }
   const requestData = parsed.data as ChatCompletionRequest;
+  audit.received("POST", "/v1/chat/completions", {
+    model: requestData.model,
+    stream: requestData.stream,
+    messageCount: requestData.messages.length,
+  });
+  audit.requestBody(raw);
 
   // Truncation recovery preprocessing.
   requestData.messages = (await applyTruncationRecovery(
@@ -159,6 +170,7 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
     "",
     config,
   );
+  audit.kiroPayload(payload);
   const toolNameMap = await buildToolNameReverseMap(
     openaiToolNames(requestData.tools as any[]),
   );
@@ -177,10 +189,13 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
       signal: ac.signal,
     });
 
+  audit.upstreamRequest(url, requestData.model, requestData.stream);
   const initial = await doFetch();
+  audit.upstreamResponse(initial.status);
   if (initial.status !== 200) {
     const errorText = await initial.text();
     const enhanced = enhanceKiroErrorText(errorText);
+    audit.error("upstream non-200", { status: initial.status, reason: enhanced.reason });
     throw new HTTPException(initial.status as any, {
       message: `Upstream API error: ${enhanced.userMessage}`,
     });
@@ -204,30 +219,38 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
               requestMessages: messagesForTokenizer,
               requestTools: toolsForTokenizer,
               toolNameMap,
+              audit,
             })) {
               controller.enqueue(encoder.encode(chunk));
             }
+            audit.completed({ mode: "stream" });
             controller.close();
             return;
           } catch (e) {
             if (e instanceof FirstTokenTimeoutError && attempt < config.firstTokenMaxRetries - 1) {
+              audit.upstreamRetry(attempt + 1, config.firstTokenMaxRetries);
               const retry = await doFetch();
+              audit.upstreamResponse(retry.status);
               if (retry.status !== 200) {
+                audit.error("upstream retry non-200", { status: retry.status });
                 controller.error(new Error(`Upstream error ${retry.status}`));
                 return;
               }
               response = retry;
               continue;
             }
+            audit.error("stream error", { message: e instanceof Error ? e.message : String(e) });
             controller.error(e);
             return;
           }
         }
+        audit.error("first-token retries exhausted");
         controller.error(
           new Error(`Model did not respond after ${config.firstTokenMaxRetries} attempts`),
         );
       },
       cancel() {
+        audit.error("client cancelled");
         ac.abort();
       },
     });
@@ -252,6 +275,13 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
     requestMessages: messagesForTokenizer,
     requestTools: toolsForTokenizer,
     toolNameMap,
+    audit,
+  });
+  audit.responseBody(openaiResponse);
+  audit.completed({
+    mode: "non-stream",
+    finishReason: openaiResponse.choices?.[0]?.finish_reason,
+    usage: openaiResponse.usage,
   });
   return c.json(openaiResponse);
 });

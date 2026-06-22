@@ -17,6 +17,7 @@ import {
 import { countTokens, estimateRequestTokens } from "../lib/tokenizer";
 import { callKiroMcpApi, generateSearchSummary } from "../lib/mcpTools";
 import { saveToolTruncation, saveContentTruncation } from "../lib/truncation";
+import type { AuditLogger } from "../lib/auditLog";
 
 /** Anthropic SSE event line: `event: <type>\ndata: <json>\n\n`. */
 export function formatSseEvent(eventType: string, data: Record<string, any>): string {
@@ -63,6 +64,7 @@ export interface AnthropicStreamArgs {
   requestTools?: Record<string, any>[] | null;
   requestSystem?: unknown;
   toolNameMap?: Record<string, string>;
+  audit?: AuditLogger;
 }
 
 /** Build a web_search_result content list from MCP results. */
@@ -128,6 +130,7 @@ export async function* streamKiroToAnthropic(
     firstTokenTimeoutMs,
     true,
     args.toolNameMap,
+    args.audit,
   )) {
     if (event.type === "content") {
       const content = event.content ?? "";
@@ -362,6 +365,7 @@ export async function collectAnthropicResponse(
     args.firstTokenTimeoutMs,
     true,
     args.toolNameMap,
+    args.audit,
   );
   const upstreamCacheUsage = extractCacheUsageFields(result.usage);
 

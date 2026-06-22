@@ -26,7 +26,9 @@
     "AUTO_TRIM_PAYLOAD": "false",
     "TOOL_DESCRIPTION_MAX_LENGTH": "10000",
     "MODEL_CACHE_TTL": "3600",
-    "LOG_LEVEL": "INFO"
+    "LOG_LEVEL": "INFO",
+    "DEBUG_STREAM_EVENTS": "false",
+    "DEBUG_BODIES": "false"
   },
   "kv_namespaces": [
     {

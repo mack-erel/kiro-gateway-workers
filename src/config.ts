@@ -104,6 +104,10 @@ export interface Env {
   TOOL_DESCRIPTION_MAX_LENGTH?: string;
   MODEL_CACHE_TTL?: string;
   LOG_LEVEL?: string;
+  /** Audit log: emit one structured event per KiroEvent (off by default). */
+  DEBUG_STREAM_EVENTS?: string;
+  /** Audit log: emit request / Kiro-payload / response bodies (off by default). */
+  DEBUG_BODIES?: string;
   PROXY_API_KEY?: string;
   MODELS_KV?: KVNamespace;
 }
@@ -126,6 +130,8 @@ export interface Config {
   toolDescriptionMaxLength: number;
   modelCacheTtlMs: number;
   logLevel: string;
+  debugStreamEvents: boolean;
+  debugBodies: boolean;
   proxyApiKey: string | null;
 }
 
@@ -180,6 +186,8 @@ export function loadConfig(env: Env): Config {
     toolDescriptionMaxLength: num(env.TOOL_DESCRIPTION_MAX_LENGTH, 10000),
     modelCacheTtlMs: num(env.MODEL_CACHE_TTL, 3600) * 1000,
     logLevel: (env.LOG_LEVEL || "INFO").toUpperCase(),
+    debugStreamEvents: truthy(env.DEBUG_STREAM_EVENTS, false),
+    debugBodies: truthy(env.DEBUG_BODIES, false),
     proxyApiKey: env.PROXY_API_KEY || null,
   };
 }

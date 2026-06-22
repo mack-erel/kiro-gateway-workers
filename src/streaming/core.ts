@@ -17,6 +17,7 @@ import {
   type ParsedToolCall,
 } from "../parsers/eventStream";
 import { ThinkingParser } from "../parsers/thinking";
+import type { AuditLogger } from "../lib/auditLog";
 
 /** Minimal cache contract needed for token math (full impl in lib/cache). */
 export interface MaxInputTokensProvider {
@@ -67,8 +68,48 @@ async function readWithTimeout(
  * @param firstTokenTimeoutMs Override for the first-token timeout.
  * @param enableThinkingParser Whether to run the thinking FSM.
  * @param toolNameMap Optional {alias: original} map to restore tool names.
+ * @param audit Optional audit logger; each KiroEvent is logged (Level 2).
  */
 export async function* parseKiroStream(
+  body: ReadableStream<Uint8Array>,
+  config: Config,
+  firstTokenTimeoutMs: number,
+  enableThinkingParser = true,
+  toolNameMap?: Record<string, string>,
+  audit?: AuditLogger,
+): AsyncGenerator<KiroEvent, void, unknown> {
+  for await (const event of parseKiroStreamRaw(
+    body,
+    config,
+    firstTokenTimeoutMs,
+    enableThinkingParser,
+    toolNameMap,
+  )) {
+    // Single choke point for Level-2 audit logging — every event passes here.
+    if (audit) audit.streamEvent(event.type, summarizeEvent(event));
+    yield event;
+  }
+}
+
+/** Compact, body-free summary of a KiroEvent for the audit log. */
+function summarizeEvent(event: KiroEvent): Record<string, unknown> {
+  switch (event.type) {
+    case "content":
+      return { chars: event.content?.length ?? 0 };
+    case "thinking":
+      return { chars: event.thinkingContent?.length ?? 0 };
+    case "tool_use":
+      return { tool: event.toolUse?.name, argChars: event.toolUse?.arguments.length ?? 0 };
+    case "context_usage":
+      return { percentage: event.contextUsagePercentage };
+    case "usage":
+      return { usage: event.usage };
+    default:
+      return {};
+  }
+}
+
+async function* parseKiroStreamRaw(
   body: ReadableStream<Uint8Array>,
   config: Config,
   firstTokenTimeoutMs: number,
@@ -204,6 +245,7 @@ export async function collectStreamToResult(
   firstTokenTimeoutMs: number,
   enableThinkingParser = true,
   toolNameMap?: Record<string, string>,
+  audit?: AuditLogger,
 ): Promise<StreamResult> {
   const result: StreamResult = {
     content: "",
@@ -220,6 +262,7 @@ export async function collectStreamToResult(
     firstTokenTimeoutMs,
     enableThinkingParser,
     toolNameMap,
+    audit,
   )) {
     if (event.type === "content" && event.content) {
       result.content += event.content;

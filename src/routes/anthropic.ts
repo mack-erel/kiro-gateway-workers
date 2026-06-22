@@ -31,6 +31,7 @@ import {
   generateTruncationUserMessage,
 } from "../lib/truncation";
 import { enhanceKiroErrorText } from "../lib/errors";
+import { AuditLogger } from "../lib/auditLog";
 
 export const anthropicRoutes = new Hono<{ Bindings: Env }>();
 
@@ -107,9 +108,12 @@ async function applyTruncationRecovery(messages: any[]): Promise<any[]> {
 // POST /v1/messages
 anthropicRoutes.post("/v1/messages", async (c) => {
   const config = loadConfig(c.env);
+  const audit = new AuditLogger(config);
   const auth = authenticate(c, true, config.proxyApiKey);
+  await audit.auth(auth.token, auth.isPassthrough ? "passthrough" : "proxy");
 
   if (!auth.isPassthrough) {
+    audit.rejected(401, "non-passthrough token");
     return c.json(
       anthropicError(
         "authentication_error",
@@ -122,9 +126,16 @@ anthropicRoutes.post("/v1/messages", async (c) => {
   const raw = await c.req.json();
   const parsed = anthropicMessagesRequestSchema.safeParse(raw);
   if (!parsed.success) {
+    audit.rejected(422, "schema validation failed");
     return c.json({ detail: parsed.error.issues }, 422);
   }
   const requestData = parsed.data as AnthropicMessagesRequest;
+  audit.received("POST", "/v1/messages", {
+    model: requestData.model,
+    stream: requestData.stream,
+    messageCount: requestData.messages.length,
+  });
+  audit.requestBody(raw);
 
   requestData.messages = (await applyTruncationRecovery(
     requestData.messages as any[],
@@ -146,8 +157,10 @@ anthropicRoutes.post("/v1/messages", async (c) => {
   try {
     ({ payload } = await anthropicToKiro(requestData, conversationId, "", config));
   } catch (e) {
+    audit.rejected(400, "payload build failed");
     return c.json(anthropicError("invalid_request_error", String(e)), 400);
   }
+  audit.kiroPayload(payload);
   const toolNameMap = requestData.tools
     ? await buildToolNameReverseMap((requestData.tools as any[]).map((t) => t.name))
     : undefined;
@@ -165,10 +178,13 @@ anthropicRoutes.post("/v1/messages", async (c) => {
       signal: ac.signal,
     });
 
+  audit.upstreamRequest(url, requestData.model, requestData.stream);
   const initial = await doFetch();
+  audit.upstreamResponse(initial.status);
   if (initial.status !== 200) {
     const errorText = await initial.text();
     const enhanced = enhanceKiroErrorText(errorText);
+    audit.error("upstream non-200", { status: initial.status, reason: enhanced.reason });
     return c.json(anthropicError("api_error", enhanced.userMessage), initial.status as any);
   }
 
@@ -182,6 +198,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     requestTools: toolsForTokenizer,
     requestSystem: systemForTokenizer,
     toolNameMap,
+    audit,
   };
 
   if (requestData.stream) {
@@ -198,11 +215,15 @@ anthropicRoutes.post("/v1/messages", async (c) => {
               controller.enqueue(encoder.encode(chunk));
             }
             controller.close();
+            audit.completed({ mode: "stream" });
             return;
           } catch (e) {
             if (e instanceof FirstTokenTimeoutError && attempt < config.firstTokenMaxRetries - 1) {
+              audit.upstreamRetry(attempt + 1, config.firstTokenMaxRetries);
               const retry = await doFetch();
+              audit.upstreamResponse(retry.status);
               if (retry.status !== 200) {
+                audit.error("upstream retry non-200", { status: retry.status });
                 controller.enqueue(
                   encoder.encode(
                     formatSseEvent("error", anthropicError("api_error", `Upstream error ${retry.status}`)),
@@ -215,6 +236,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
               continue;
             }
             // Emit an Anthropic error event before closing.
+            audit.error("stream error", { message: e instanceof Error ? e.message : String(e) });
             controller.enqueue(
               encoder.encode(
                 formatSseEvent(
@@ -232,6 +254,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
         }
       },
       cancel() {
+        audit.error("client cancelled");
         ac.abort();
       },
     });
@@ -249,20 +272,33 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     ...streamArgs,
     body: initial.body!,
   });
+  audit.responseBody(anthropicResponse);
+  audit.completed({
+    mode: "non-stream",
+    stopReason: anthropicResponse.stop_reason,
+    usage: anthropicResponse.usage,
+  });
   return c.json(anthropicResponse);
 });
 
 // POST /v1/messages/count_tokens — local estimate only, no upstream call.
 anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
   const config = loadConfig(c.env);
-  authenticate(c, true, config.proxyApiKey);
+  const audit = new AuditLogger(config);
+  const auth = authenticate(c, true, config.proxyApiKey);
+  await audit.auth(auth.token, auth.isPassthrough ? "passthrough" : "proxy");
 
   const raw = await c.req.json();
   const parsed = anthropicCountTokensRequestSchema.safeParse(raw);
   if (!parsed.success) {
+    audit.rejected(422, "schema validation failed");
     return c.json({ detail: parsed.error.issues }, 422);
   }
   const requestData = parsed.data;
+  audit.received("POST", "/v1/messages/count_tokens", {
+    model: requestData.model,
+    messageCount: requestData.messages.length,
+  });
 
   const estimate = estimateRequestTokens(
     requestData.messages as any[],
@@ -271,5 +307,6 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
     true, // Claude correction enabled (matches Python count_tokens endpoint)
   );
 
+  audit.completed({ inputTokens: estimate.totalTokens });
   return c.json({ input_tokens: estimate.totalTokens });
 });

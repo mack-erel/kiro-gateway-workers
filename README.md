@@ -102,7 +102,31 @@ Tunables live in `wrangler.jsonc` under `vars` and are read via `loadConfig`
 | `WEB_SEARCH_ENABLED` | `true` | Auto-inject web_search tool |
 | `KIRO_MAX_PAYLOAD_BYTES` | `600000` | Payload-size guard |
 | `AUTO_TRIM_PAYLOAD` | `false` | Trim oldest history over the limit |
+| `DEBUG_STREAM_EVENTS` | `false` | Audit-log each KiroEvent (Level 2) |
+| `DEBUG_BODIES` | `false` | Audit-log request / payload / response bodies (Level 3) |
 | `PROXY_API_KEY` | _(unset)_ | Optional non-ksk_ gate (secret) |
+
+## Audit logging
+
+Every request emits structured one-line JSON records to `console`, captured by
+Workers Logs / `wrangler tail` / Logpush. Three tiers:
+
+- **Level 1 — always on.** Request lifecycle: `request.received`,
+  `request.auth` (key is **hashed**, never logged raw), `upstream.request`,
+  `upstream.response`, `upstream.retry`, `request.completed` (tokens, stop
+  reason, elapsed), `request.rejected` / `request.error`.
+- **Level 2 — `DEBUG_STREAM_EVENTS=true`.** One `stream.event` record per
+  KiroEvent (content/thinking/tool_use/usage/context_usage), with sizes/metadata
+  only — not the text itself.
+- **Level 3 — `DEBUG_BODIES=true`.** `request.body`, `kiro.payload`, and
+  `response.body`. **May contain prompt PII**, so it is off by default.
+
+Each record carries a `requestId` (correlation id) and an ISO `ts`. Watch live
+with:
+
+```bash
+npx wrangler tail
+```
 
 ## Project structure
 
