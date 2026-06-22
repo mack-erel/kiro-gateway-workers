@@ -8,9 +8,8 @@
  * before any bytes are sent to the client.
  */
 import { Hono } from "hono";
-import { HTTPException } from "hono/http-exception";
 import type { Env } from "../config";
-import { loadConfig, FALLBACK_MODELS } from "../config";
+import { loadConfig, FALLBACK_MODELS, HIDDEN_MODELS, MODEL_ALIASES, HIDDEN_FROM_LIST } from "../config";
 import { authenticate } from "../auth/middleware";
 import { getPassthroughSession } from "../auth/passthroughSession";
 import {
@@ -21,6 +20,7 @@ import { buildOpenAIKiroPayload } from "../converters/openai";
 import { buildToolNameReverseMap } from "../converters/core";
 import { generateConversationId } from "../lib/utils";
 import { ModelInfoCache } from "../lib/cache";
+import { ModelResolver } from "../lib/modelResolver";
 import { requestWithRetry } from "../lib/httpClient";
 import { FirstTokenTimeoutError } from "../streaming/core";
 import { streamKiroToOpenAI, collectOpenAIResponse } from "../streaming/openai";
@@ -31,9 +31,33 @@ import {
   generateTruncationUserMessage,
 } from "../lib/truncation";
 import { enhanceKiroErrorText } from "../lib/errors";
+import { PayloadTooLargeError } from "../lib/payloadGuards";
 import { AuditLogger } from "../lib/auditLog";
 
 export const openaiRoutes = new Hono<{ Bindings: Env }>();
+
+/**
+ * OpenAI-shaped error body. The OpenAI SDK parses `{error:{message,type,code}}`
+ * to surface a useful error; a plain-text body breaks that parsing (this is why
+ * we don't let Hono's default HTTPException response through for API errors).
+ */
+function openaiError(message: string, type = "kiro_api_error", code: number | string | null = null) {
+  return { error: { message, type, code, param: null } };
+}
+
+/**
+ * 422 validation-error body, mirroring Python's `sanitize_validation_errors`:
+ * the Zod issues plus a truncated echo of the raw request body.
+ */
+function validationError(issues: unknown, raw: unknown) {
+  let body = "";
+  try {
+    body = (typeof raw === "string" ? raw : JSON.stringify(raw)).slice(0, 500);
+  } catch {
+    body = "";
+  }
+  return { detail: issues, body };
+}
 
 /** Collect tool names from an OpenAI request (standard + flat shapes). */
 function openaiToolNames(tools: any[] | null | undefined): string[] {
@@ -97,10 +121,30 @@ openaiRoutes.get("/v1/models", async (c) => {
 
   let modelIds: string[];
   if (auth.isPassthrough) {
+    // Resolve the discovered list through ModelResolver so aliases are shown
+    // (e.g. auto-kiro) and HIDDEN_FROM_LIST entries (e.g. auto) are hidden.
     const session = await getPassthroughSession(auth.token, config.apiRegion);
-    modelIds = session.modelIds ?? FALLBACK_MODELS.map((m) => m.modelId);
+    const modelCache = new ModelInfoCache(config.modelCacheTtlMs);
+    modelCache.update(session.modelsData);
+    const resolver = new ModelResolver(
+      modelCache,
+      HIDDEN_MODELS,
+      MODEL_ALIASES,
+      HIDDEN_FROM_LIST,
+    );
+    modelIds = resolver.getAvailableModels();
   } else {
-    modelIds = FALLBACK_MODELS.map((m) => m.modelId);
+    // Proxy mode: advertise the static fallback list, still respecting the
+    // alias/hidden policy for a consistent catalog.
+    const modelCache = new ModelInfoCache(config.modelCacheTtlMs);
+    modelCache.update(FALLBACK_MODELS);
+    const resolver = new ModelResolver(
+      modelCache,
+      HIDDEN_MODELS,
+      MODEL_ALIASES,
+      HIDDEN_FROM_LIST,
+    );
+    modelIds = resolver.getAvailableModels();
   }
 
   return c.json({
@@ -125,16 +169,21 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
   // Only passthrough is supported by this gateway.
   if (!auth.isPassthrough) {
     audit.rejected(401, "non-passthrough token");
-    throw new HTTPException(401, {
-      message: "Provide a Kiro API key (ksk_*) as the Bearer token.",
-    });
+    return c.json(
+      openaiError(
+        "Provide a Kiro API key (ksk_*) as the Bearer token.",
+        "authentication_error",
+        401,
+      ),
+      401,
+    );
   }
 
   const raw = await c.req.json();
   const parsed = chatCompletionRequestSchema.safeParse(raw);
   if (!parsed.success) {
     audit.rejected(422, "schema validation failed");
-    return c.json({ detail: parsed.error.issues }, 422);
+    return c.json(validationError(parsed.error.issues, raw), 422);
   }
   const requestData = parsed.data as ChatCompletionRequest;
   audit.received("POST", "/v1/chat/completions", {
@@ -162,14 +211,25 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
   const session = await getPassthroughSession(auth.token, config.apiRegion);
   const authContext = session.authContext;
   const modelCache = new ModelInfoCache(config.modelCacheTtlMs);
+  modelCache.update(session.modelsData);
 
   const conversationId = generateConversationId();
-  const { payload } = await buildOpenAIKiroPayload(
-    requestData,
-    conversationId,
-    "",
-    config,
-  );
+  let payload: Record<string, any>;
+  try {
+    ({ payload } = await buildOpenAIKiroPayload(
+      requestData,
+      conversationId,
+      "",
+      config,
+    ));
+  } catch (e) {
+    if (e instanceof PayloadTooLargeError) {
+      audit.rejected(413, "payload too large");
+      return c.json(openaiError(e.message, "invalid_request_error", 413), 413);
+    }
+    audit.rejected(400, "payload build failed");
+    return c.json(openaiError(String(e), "invalid_request_error", 400), 400);
+  }
   audit.kiroPayload(payload);
   const toolNameMap = await buildToolNameReverseMap(
     openaiToolNames(requestData.tools as any[]),
@@ -196,9 +256,10 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
     const errorText = await initial.text();
     const enhanced = enhanceKiroErrorText(errorText);
     audit.error("upstream non-200", { status: initial.status, reason: enhanced.reason });
-    throw new HTTPException(initial.status as any, {
-      message: `Upstream API error: ${enhanced.userMessage}`,
-    });
+    return c.json(
+      openaiError(`Upstream API error: ${enhanced.userMessage}`, "kiro_api_error", initial.status),
+      initial.status as any,
+    );
   }
 
   if (requestData.stream) {

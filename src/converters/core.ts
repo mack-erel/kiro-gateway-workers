@@ -12,7 +12,7 @@ import type {
   UnifiedMessage,
   UnifiedTool,
 } from "../types";
-import { checkPayloadSize, trimPayloadToLimit } from "../lib/payloadGuards";
+import { checkPayloadSize, trimPayloadToLimit, PayloadTooLargeError } from "../lib/payloadGuards";
 
 export interface KiroPayloadResult {
   payload: Record<string, any>;
@@ -847,10 +847,19 @@ export async function buildKiroPayload(args: {
   if (history.length) payload["conversationState"]["history"] = history;
   if (profileArn) payload["profileArn"] = profileArn;
 
-  // Optional payload-size guard.
-  if (config.autoTrimPayload) {
-    if (checkPayloadSize(payload) > config.maxPayloadBytes) {
+  // Payload-size guard. With auto-trim on, trim oldest history to fit; with it
+  // off, reject loudly rather than forwarding an oversize payload that Kiro
+  // bounces back as a misleading "Improperly formed request." 400.
+  if (checkPayloadSize(payload) > config.maxPayloadBytes) {
+    if (config.autoTrimPayload) {
       trimPayloadToLimit(payload, config.maxPayloadBytes);
+      // A single message can still exceed the limit after trimming history.
+      const after = checkPayloadSize(payload);
+      if (after > config.maxPayloadBytes) {
+        throw new PayloadTooLargeError(after, config.maxPayloadBytes);
+      }
+    } else {
+      throw new PayloadTooLargeError(checkPayloadSize(payload), config.maxPayloadBytes);
     }
   }
 

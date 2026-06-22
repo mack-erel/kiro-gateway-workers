@@ -17,12 +17,16 @@
 import type { KiroAuthContext } from "../types";
 import { sha256Hex } from "../lib/utils";
 import { createKiroAuthContext } from "./kiroAuth";
+import { FALLBACK_MODELS, getKiroManagementHost } from "../config";
 
 /** Cached, request-independent state derived from a client API key. */
 export interface PassthroughSession {
   authContext: KiroAuthContext;
-  /** Resolved model IDs for this key. Populated by aux-features model discovery. */
-  modelIds: string[] | null;
+  /**
+   * Live model list discovered from the management endpoint (or the static
+   * fallback if discovery failed). Plain data, so it is Workers-safe to cache.
+   */
+  modelsData: Array<Record<string, any>>;
 }
 
 const _sessions = new Map<string, PassthroughSession>();
@@ -33,10 +37,50 @@ export async function sessionKeyHash(apiKey: string): Promise<string> {
 }
 
 /**
+ * Discover the available model list from the management endpoint.
+ *
+ * API-key auth (kiro-cli) lists models via ListAvailableModels on
+ * `https://management.{region}.kiro.dev` — the runtime host does not serve it.
+ * Mirrors `_fetch_models_via_management`. Throws on HTTP/network error so the
+ * caller can fall back to the static list.
+ */
+async function fetchModelsViaManagement(
+  apiKey: string,
+  region: string,
+): Promise<Array<Record<string, any>>> {
+  const url = `${getKiroManagementHost(region)}/`;
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${apiKey}`,
+    tokentype: "API_KEY",
+    "Content-Type": "application/x-amz-json-1.0",
+    "x-amz-target": "AmazonCodeWhispererService.ListAvailableModels",
+  };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ origin: "AI_EDITOR" }),
+      signal: controller.signal,
+    });
+    if (response.status !== 200) {
+      throw new Error(`management ListAvailableModels returned ${response.status}`);
+    }
+    const data = (await response.json()) as Record<string, any>;
+    return (data["models"] as Array<Record<string, any>>) ?? [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Get or create a cached passthrough session for a client API key.
  *
- * Model-list discovery is layered on in the aux-features commit; for now a new
- * session starts with `modelIds = null` (callers fall back to the static list).
+ * On first use for a key, the model list is discovered from the management
+ * endpoint (one-time, then cached). Discovery failure falls back to the static
+ * FALLBACK_MODELS so the gateway still works.
  */
 export async function getPassthroughSession(
   apiKey: string,
@@ -47,7 +91,23 @@ export async function getPassthroughSession(
   let session = _sessions.get(hash);
   if (!session) {
     const authContext = await createKiroAuthContext(apiKey, region);
-    session = { authContext, modelIds: null };
+
+    let modelsData: Array<Record<string, any>>;
+    try {
+      const discovered = await fetchModelsViaManagement(apiKey, region);
+      modelsData = discovered.length ? discovered : FALLBACK_MODELS;
+    } catch (e) {
+      console.warn(
+        JSON.stringify({
+          event: "model.discovery.failed",
+          keyHash: hash,
+          message: e instanceof Error ? e.message : String(e),
+        }),
+      );
+      modelsData = FALLBACK_MODELS;
+    }
+
+    session = { authContext, modelsData };
     _sessions.set(hash, session);
   }
   return session;

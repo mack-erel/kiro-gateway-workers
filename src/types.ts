@@ -6,6 +6,7 @@
  * Kiro response stream into {@link KiroEvent}s before re-emitting OpenAI or
  * Anthropic output.
  */
+import type { TruncationInfo } from "./parsers/eventStream";
 
 // ============================================================================
 // Unified request representation (provider-neutral)
@@ -73,7 +74,14 @@ export interface KiroEvent {
   type: KiroEventType;
   content?: string;
   thinkingContent?: string;
-  toolUse?: { name: string; toolUseId: string; arguments: string };
+  toolUse?: {
+    name: string;
+    toolUseId: string;
+    arguments: string;
+    /** Set when the parser detected the tool args were truncated mid-stream. */
+    truncationDetected?: boolean;
+    truncationInfo?: TruncationInfo;
+  };
   usage?: Record<string, unknown>;
   contextUsagePercentage?: number;
   isFirstThinkingChunk?: boolean;

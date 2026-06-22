@@ -40,8 +40,25 @@ export function classifyNetworkError(error: unknown): NetworkErrorInfo {
   const technicalDetails = `${name}: ${msg}`;
   const lower = msg.toLowerCase();
 
-  // Aborts/timeouts (AbortController, first-token timeout).
-  if (name === "TimeoutError" || name === "AbortError" || lower.includes("timed out")) {
+  // Aborts/timeouts (AbortController, first-token timeout, stream read stall).
+  if (name === "TimeoutError" || name === "AbortError" || lower.includes("timed out") || lower.includes("stream stalled")) {
+    // Distinguish a connect timeout (never reached the server) from a read
+    // timeout (server went quiet mid-response) — they need different advice.
+    const isConnectTimeout = lower.includes("connect") && !lower.includes("read");
+    if (isConnectTimeout) {
+      return {
+        category: "timeout_connect",
+        userMessage: "Connection timeout - could not reach the server in time.",
+        troubleshootingSteps: [
+          "The provider may be unreachable or overloaded",
+          "Check your network connection",
+          "Try again in a few moments",
+        ],
+        technicalDetails,
+        isRetryable: true,
+        suggestedHttpCode: 504,
+      };
+    }
     return {
       category: "timeout_read",
       userMessage: "Request timeout - the server stopped responding.",
@@ -53,6 +70,27 @@ export function classifyNetworkError(error: unknown): NetworkErrorInfo {
       technicalDetails,
       isRetryable: true,
       suggestedHttpCode: 504,
+    };
+  }
+
+  // Network unreachable (no route to host / network down).
+  if (
+    lower.includes("network is unreachable") ||
+    lower.includes("enetunreach") ||
+    lower.includes("no route to host") ||
+    lower.includes("ehostunreach")
+  ) {
+    return {
+      category: "network_unreachable",
+      userMessage: "Network unreachable - no route to the provider's server.",
+      troubleshootingSteps: [
+        "Check your internet connection and routing",
+        "The provider's network may be temporarily unreachable",
+        "Try again in a few moments",
+      ],
+      technicalDetails,
+      isRetryable: true,
+      suggestedHttpCode: 502,
     };
   }
 

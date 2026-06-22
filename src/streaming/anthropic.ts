@@ -273,8 +273,15 @@ export async function* streamKiroToAnthropic(
         }
       }
 
-      // Find truncation flag (parseKiroStream loses it; re-detect not needed
-      // here since collect path handles it — but mirror the structure).
+      // Capture the truncation flag the parser attached so recovery state is
+      // persisted after the stream completes (mirrors the Python collect path).
+      if (event.toolUse.truncationDetected && event.toolUse.truncationInfo) {
+        truncatedTools.push({
+          id: toolId,
+          name: toolName,
+          info: event.toolUse.truncationInfo as unknown as Record<string, any>,
+        });
+      }
       yield formatSseEvent("content_block_start", {
         type: "content_block_start",
         index: currentBlockIndex,
@@ -346,7 +353,7 @@ export async function* streamKiroToAnthropic(
 export async function collectAnthropicResponse(
   args: AnthropicStreamArgs,
 ): Promise<Record<string, any>> {
-  const { model, modelCache, config } = args;
+  const { model, modelCache, auth, config } = args;
   const messageId = generateMessageId();
 
   let inputTokens = 0;
@@ -383,18 +390,47 @@ export async function collectAnthropicResponse(
   }
   if (textContent) contentBlocks.push({ type: "text", text: textContent });
 
+  // Tool calls: intercept web_search (Path B) so the non-streaming path returns
+  // executed search results instead of an unresolved tool_use block — mirrors
+  // the streaming adapter. Only real (non-web_search) tool calls drive
+  // stop_reason: tool_use.
+  let realToolUseCount = 0;
+  let webSearchOutput = "";
   for (const tc of result.toolCalls) {
-    const toolId = tc.id || `toolu_${uuidHex(24)}`;
+    const toolName = tc.function.name;
     let input: Record<string, any> = {};
     try {
       input = tc.function.arguments ? JSON.parse(tc.function.arguments) : {};
     } catch {
       input = {};
     }
-    contentBlocks.push({ type: "tool_use", id: toolId, name: tc.function.name, input });
+
+    if (toolName === "web_search" && config.webSearchEnabled) {
+      const query = input["query"] ?? "";
+      if (query) {
+        const { toolUseId: mcpId, results } = await callKiroMcpApi(query, auth);
+        if (results !== null) {
+          const mcpToolId = mcpId ?? `srvtoolu_${uuidHex(32)}`;
+          contentBlocks.push({ id: mcpToolId, type: "server_tool_use", name: "web_search", input: { query } });
+          contentBlocks.push({
+            type: "web_search_tool_result",
+            tool_use_id: mcpToolId,
+            content: buildSearchContent(results),
+          });
+          const summary = generateSearchSummary(query, results);
+          contentBlocks.push({ type: "text", text: summary });
+          webSearchOutput += summary;
+          continue;
+        }
+      }
+    }
+
+    const toolId = tc.id || `toolu_${uuidHex(24)}`;
+    contentBlocks.push({ type: "tool_use", id: toolId, name: toolName, input });
+    realToolUseCount += 1;
   }
 
-  let outputTokens = countTokens(result.content + result.thinkingContent);
+  let outputTokens = countTokens(result.content + result.thinkingContent + webSearchOutput);
   if (result.contextUsagePercentage !== null) {
     const [promptTokens, , promptSource] = calculateTokensFromContextUsage(
       result.contextUsagePercentage,
@@ -411,7 +447,7 @@ export async function collectAnthropicResponse(
 
   const stopReason = contentWasTruncated
     ? "max_tokens"
-    : result.toolCalls.length
+    : realToolUseCount > 0
       ? "tool_use"
       : "end_turn";
 

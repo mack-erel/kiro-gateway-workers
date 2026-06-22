@@ -41,17 +41,31 @@ export class FirstTokenTimeoutError extends Error {
   }
 }
 
-/** Read the next chunk, rejecting with FirstTokenTimeoutError after `timeoutMs`. */
+/**
+ * Raised when a mid-stream chunk stalls beyond STREAMING_READ_TIMEOUT.
+ * Mirrors httpx's read-timeout on `aiter_bytes` in the Python original — a
+ * wedged upstream connection must surface rather than hang the invocation.
+ */
+export class StreamReadTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StreamReadTimeoutError";
+  }
+}
+
+/**
+ * Read the next chunk, rejecting after `timeoutMs`. `makeError` builds the
+ * rejection so the first-token read and inter-chunk reads can raise distinct
+ * error types while sharing the race logic.
+ */
 async function readWithTimeout(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   timeoutMs: number,
+  makeError: (ms: number) => Error,
 ): Promise<ReadableStreamReadResult<Uint8Array>> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new FirstTokenTimeoutError(`No response within ${timeoutMs}ms`)),
-      timeoutMs,
-    );
+    timer = setTimeout(() => reject(makeError(timeoutMs)), timeoutMs);
   });
   try {
     return await Promise.race([reader.read(), timeout]);
@@ -120,27 +134,34 @@ async function* parseKiroStreamRaw(
 
   let thinkingParser: ThinkingParser | null = null;
   if (config.fakeReasoningEnabled && enableThinkingParser) {
-    thinkingParser = new ThinkingParser({ handlingMode: config.fakeReasoningHandling });
+    thinkingParser = new ThinkingParser({
+      handlingMode: config.fakeReasoningHandling,
+      initialBufferSize: config.fakeReasoningInitialBufferSize,
+    });
   }
 
   const reader = body.getReader();
+  const readTimeoutMs = config.streamingReadTimeoutMs;
 
   try {
-    // First chunk with timeout.
-    let first: ReadableStreamReadResult<Uint8Array>;
-    try {
-      first = await readWithTimeout(reader, firstTokenTimeoutMs);
-    } catch (e) {
-      if (e instanceof FirstTokenTimeoutError) throw e;
-      throw e;
-    }
+    // First chunk with the (shorter) first-token timeout.
+    const first = await readWithTimeout(
+      reader,
+      firstTokenTimeoutMs,
+      (ms) => new FirstTokenTimeoutError(`No response within ${ms}ms`),
+    );
     if (first.done) return; // empty response — normal
 
     yield* processChunk(parser, first.value, thinkingParser);
 
-    // Remaining chunks (no per-chunk first-token timeout).
+    // Remaining chunks: enforce the inter-chunk read timeout so a stream that
+    // goes silent mid-flight aborts instead of hanging the invocation.
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithTimeout(
+        reader,
+        readTimeoutMs,
+        (ms) => new StreamReadTimeoutError(`Stream stalled: no data within ${ms}ms`),
+      );
       if (done) break;
       yield* processChunk(parser, value, thinkingParser);
     }
@@ -179,9 +200,19 @@ async function* parseKiroStreamRaw(
       }
     }
 
-    // Emit accumulated tool calls.
+    // Emit accumulated tool calls, preserving truncation flags so the
+    // downstream adapters can persist recovery state.
     for (const tc of parser.getToolCalls()) {
-      yield { type: "tool_use", toolUse: { name: tc.function.name, toolUseId: tc.id, arguments: tc.function.arguments } };
+      yield {
+        type: "tool_use",
+        toolUse: {
+          name: tc.function.name,
+          toolUseId: tc.id,
+          arguments: tc.function.arguments,
+          truncationDetected: tc._truncationDetected,
+          truncationInfo: tc._truncationInfo,
+        },
+      };
     }
   } finally {
     reader.releaseLock();
@@ -275,6 +306,8 @@ export async function collectStreamToResult(
         id: event.toolUse.toolUseId,
         type: "function",
         function: { name: event.toolUse.name, arguments: event.toolUse.arguments },
+        _truncationDetected: event.toolUse.truncationDetected,
+        _truncationInfo: event.toolUse.truncationInfo,
       });
     } else if (event.type === "usage" && event.usage) {
       result.usage = event.usage;

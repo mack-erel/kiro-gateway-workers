@@ -14,6 +14,20 @@
 import type { Config } from "../config";
 import { sha256Hex } from "./utils";
 
+/**
+ * LOG_LEVEL → numeric severity. Acts as a master verbosity gate: an event is
+ * emitted only when its severity is >= the configured level. Lifecycle events
+ * are INFO; errors are ERROR. DEBUG is reserved for future per-event tuning.
+ */
+const SEVERITY: Record<string, number> = {
+  DEBUG: 0,
+  INFO: 1,
+  WARNING: 2,
+  WARN: 2,
+  ERROR: 3,
+  CRITICAL: 4,
+};
+
 /** Audit event type tags (the `event` field of each record). */
 export type AuditEvent =
   | "request.received"
@@ -35,12 +49,15 @@ export class AuditLogger {
   private readonly debugStreamEvents: boolean;
   private readonly debugBodies: boolean;
   private readonly startMs: number;
+  /** Minimum severity to emit, from LOG_LEVEL (DEBUG<INFO<WARNING<ERROR). */
+  private readonly minSeverity: number;
 
   constructor(config: Config, requestId?: string) {
     this.requestId = requestId ?? crypto.randomUUID();
     this.debugStreamEvents = config.debugStreamEvents;
     this.debugBodies = config.debugBodies;
     this.startMs = Date.now();
+    this.minSeverity = SEVERITY[config.logLevel] ?? SEVERITY.INFO;
   }
 
   /** Milliseconds since this logger (≈ the request) started. */
@@ -48,8 +65,21 @@ export class AuditLogger {
     return Date.now() - this.startMs;
   }
 
-  /** Emit one structured JSON line. */
-  private emit(event: AuditEvent, fields: Record<string, unknown>, level: "info" | "error" = "info"): void {
+  /**
+   * Emit one structured JSON line. Lifecycle events are gated by LOG_LEVEL
+   * severity; debug channels pass `bypassLevel` since they have their own
+   * explicit opt-in (DEBUG_STREAM_EVENTS / DEBUG_BODIES) that must win.
+   */
+  private emit(
+    event: AuditEvent,
+    fields: Record<string, unknown>,
+    level: "info" | "error" = "info",
+    bypassLevel = false,
+  ): void {
+    if (!bypassLevel) {
+      const severity = level === "error" ? SEVERITY.ERROR : SEVERITY.INFO;
+      if (severity < this.minSeverity) return;
+    }
     const record = {
       ts: new Date().toISOString(),
       requestId: this.requestId,
@@ -113,7 +143,7 @@ export class AuditLogger {
   /** One record per KiroEvent. No-op unless DEBUG_STREAM_EVENTS is on. */
   streamEvent(type: string, fields: Record<string, unknown> = {}): void {
     if (!this.debugStreamEvents) return;
-    this.emit("stream.event", { kiroEventType: type, ...fields });
+    this.emit("stream.event", { kiroEventType: type, ...fields }, "info", true);
   }
 
   // --- Level 3: DEBUG_BODIES ---------------------------------------------
@@ -121,18 +151,18 @@ export class AuditLogger {
   /** Log the inbound client request body. No-op unless DEBUG_BODIES is on. */
   requestBody(body: unknown): void {
     if (!this.debugBodies) return;
-    this.emit("request.body", { body });
+    this.emit("request.body", { body }, "info", true);
   }
 
   /** Log the assembled Kiro payload. No-op unless DEBUG_BODIES is on. */
   kiroPayload(payload: unknown): void {
     if (!this.debugBodies) return;
-    this.emit("kiro.payload", { payload });
+    this.emit("kiro.payload", { payload }, "info", true);
   }
 
   /** Log the outbound response body. No-op unless DEBUG_BODIES is on. */
   responseBody(body: unknown): void {
     if (!this.debugBodies) return;
-    this.emit("response.body", { body });
+    this.emit("response.body", { body }, "info", true);
   }
 }

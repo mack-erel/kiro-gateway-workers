@@ -128,6 +128,8 @@ export async function* streamKiroToOpenAI(
         id: event.toolUse.toolUseId,
         type: "function",
         function: { name: event.toolUse.name, arguments: event.toolUse.arguments },
+        _truncationDetected: event.toolUse.truncationDetected,
+        _truncationInfo: event.toolUse.truncationInfo,
       });
     } else if (event.type === "usage" && event.usage) {
       meteringData = event.usage;

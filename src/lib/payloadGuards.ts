@@ -14,6 +14,26 @@ export interface PayloadTrimStats {
   trimmed: boolean;
 }
 
+/**
+ * Thrown when a payload exceeds the size limit and auto-trim is disabled.
+ * Mirrors the Python behavior of surfacing a clear error instead of forwarding
+ * an oversize request that Kiro rejects with a misleading 400.
+ */
+export class PayloadTooLargeError extends Error {
+  readonly actualBytes: number;
+  readonly maxBytes: number;
+  constructor(actualBytes: number, maxBytes: number) {
+    super(
+      `Request payload is ${actualBytes} bytes, exceeding the ${maxBytes}-byte limit. ` +
+        `Reduce the conversation/context size, or enable AUTO_TRIM_PAYLOAD to trim ` +
+        `oldest history automatically.`,
+    );
+    this.name = "PayloadTooLargeError";
+    this.actualBytes = actualBytes;
+    this.maxBytes = maxBytes;
+  }
+}
+
 type Json = Record<string, any>;
 
 /** Serialized byte size of the payload as compact UTF-8 JSON. */

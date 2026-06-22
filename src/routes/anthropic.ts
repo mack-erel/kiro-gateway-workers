@@ -23,6 +23,7 @@ import {
   streamKiroToAnthropic,
   collectAnthropicResponse,
   formatSseEvent,
+  generateMessageId,
 } from "../streaming/anthropic";
 import {
   getToolTruncation,
@@ -30,7 +31,16 @@ import {
   generateTruncationToolResult,
   generateTruncationUserMessage,
 } from "../lib/truncation";
+import {
+  callKiroMcpApi,
+  extractQueryFromMessages,
+  generateAnthropicWebSearchSse,
+  generateSearchSummary,
+  countMessageTokens,
+} from "../lib/mcpTools";
+import { countTokens } from "../lib/tokenizer";
 import { enhanceKiroErrorText } from "../lib/errors";
+import { PayloadTooLargeError } from "../lib/payloadGuards";
 import { AuditLogger } from "../lib/auditLog";
 
 export const anthropicRoutes = new Hono<{ Bindings: Env }>();
@@ -38,6 +48,21 @@ export const anthropicRoutes = new Hono<{ Bindings: Env }>();
 /** Anthropic error JSON body. */
 function anthropicError(type: string, message: string) {
   return { type: "error", error: { type, message } };
+}
+
+/**
+ * 422 validation-error body, mirroring Python's `sanitize_validation_errors`:
+ * the Zod issues plus a truncated echo of the raw request body to aid
+ * debugging malformed requests.
+ */
+function validationError(issues: unknown, raw: unknown) {
+  let body = "";
+  try {
+    body = (typeof raw === "string" ? raw : JSON.stringify(raw)).slice(0, 500);
+  } catch {
+    body = "";
+  }
+  return { detail: issues, body };
 }
 
 const WEB_SEARCH_TOOL = {
@@ -50,6 +75,100 @@ const WEB_SEARCH_TOOL = {
     required: ["query"],
   },
 };
+
+/** True if any client-supplied tool is a native server-side web_search tool. */
+function hasNativeWebSearchTool(tools: any[] | null | undefined): boolean {
+  if (!tools) return false;
+  return tools.some(
+    (t) => typeof t?.type === "string" && t.type.startsWith("web_search"),
+  );
+}
+
+/**
+ * Path A (native Anthropic web_search): bypass generateAssistantResponse,
+ * call the MCP API directly, and emit the result as SSE (streaming) or a full
+ * JSON message (non-streaming). Mirrors `handle_native_web_search`. Works
+ * regardless of WEB_SEARCH_ENABLED — the client explicitly asked for it.
+ */
+async function handleNativeWebSearch(
+  c: any,
+  requestData: AnthropicMessagesRequest,
+  authContext: import("../types").KiroAuthContext,
+  audit: AuditLogger,
+): Promise<Response> {
+  const query = extractQueryFromMessages(requestData.messages as any[]);
+  if (!query) {
+    audit.rejected(400, "cannot extract web_search query");
+    return c.json(
+      anthropicError("invalid_request_error", "Cannot extract search query from messages"),
+      400,
+    );
+  }
+
+  const { toolUseId, results } = await callKiroMcpApi(query, authContext);
+  if (results === null) {
+    audit.error("native web_search MCP call failed");
+    return c.json(anthropicError("api_error", "Web search failed. Please try again."), 500);
+  }
+  const mcpToolId = toolUseId ?? `srvtoolu_${crypto.randomUUID().replace(/-/g, "").slice(0, 32)}`;
+
+  // Input tokens: MCP API, not the model → no Claude correction.
+  const inputTokens = countMessageTokens(requestData.messages as any[], false);
+
+  if (requestData.stream) {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const evt of generateAnthropicWebSearchSse(
+          requestData.model,
+          query,
+          mcpToolId,
+          results,
+          inputTokens,
+        )) {
+          controller.enqueue(encoder.encode(evt));
+        }
+        controller.close();
+        audit.completed({ mode: "stream", path: "native_web_search" });
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        "x-accel-buffering": "no",
+      },
+    });
+  }
+
+  // Non-streaming: full Anthropic message JSON.
+  const summary = generateSearchSummary(query, results);
+  const outputTokens = countTokens(summary, false);
+  const searchContent = ((results["results"] as any[]) ?? []).map((r) => ({
+    type: "web_search_result",
+    title: r["title"] ?? "",
+    url: r["url"] ?? "",
+    encrypted_content: r["snippet"] ?? "",
+    page_age: null,
+  }));
+  const response = {
+    id: generateMessageId(),
+    type: "message",
+    role: "assistant",
+    content: [
+      { type: "server_tool_use", id: mcpToolId, name: "web_search", input: { query } },
+      { type: "web_search_tool_result", tool_use_id: mcpToolId, content: searchContent },
+      { type: "text", text: summary },
+    ],
+    model: requestData.model,
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+  };
+  audit.responseBody(response);
+  audit.completed({ mode: "non-stream", path: "native_web_search" });
+  return c.json(response);
+}
 
 /** Truncation-recovery preprocessing for Anthropic messages. */
 async function applyTruncationRecovery(messages: any[]): Promise<any[]> {
@@ -127,7 +246,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
   const parsed = anthropicMessagesRequestSchema.safeParse(raw);
   if (!parsed.success) {
     audit.rejected(422, "schema validation failed");
-    return c.json({ detail: parsed.error.issues }, 422);
+    return c.json(validationError(parsed.error.issues, raw), 422);
   }
   const requestData = parsed.data as AnthropicMessagesRequest;
   audit.received("POST", "/v1/messages", {
@@ -137,12 +256,17 @@ anthropicRoutes.post("/v1/messages", async (c) => {
   });
   audit.requestBody(raw);
 
+  // Path A (native web_search): detect from the client's ORIGINAL tools, before
+  // Path B auto-injection adds an (untyped) web_search tool. Works regardless of
+  // WEB_SEARCH_ENABLED — the client explicitly supplied a server-side tool.
+  const isNativeWebSearch = hasNativeWebSearchTool(requestData.tools as any[]);
+
   requestData.messages = (await applyTruncationRecovery(
     requestData.messages as any[],
   )) as typeof requestData.messages;
 
-  // web_search auto-injection (Path B).
-  if (config.webSearchEnabled) {
+  // web_search auto-injection (Path B). Skipped when Path A will handle it.
+  if (config.webSearchEnabled && !isNativeWebSearch) {
     const tools = (requestData.tools ?? []) as any[];
     if (!tools.some((t) => t?.name === "web_search")) tools.push(WEB_SEARCH_TOOL);
     requestData.tools = tools as typeof requestData.tools;
@@ -151,12 +275,23 @@ anthropicRoutes.post("/v1/messages", async (c) => {
   const session = await getPassthroughSession(auth.token, config.apiRegion);
   const authContext = session.authContext;
   const modelCache = new ModelInfoCache(config.modelCacheTtlMs);
+  modelCache.update(session.modelsData);
+
+  // Path A early return: direct MCP call, bypassing generateAssistantResponse.
+  if (isNativeWebSearch) {
+    audit.received("POST", "/v1/messages", { path: "native_web_search" });
+    return handleNativeWebSearch(c, requestData, authContext, audit);
+  }
 
   const conversationId = generateConversationId();
   let payload: Record<string, any>;
   try {
     ({ payload } = await anthropicToKiro(requestData, conversationId, "", config));
   } catch (e) {
+    if (e instanceof PayloadTooLargeError) {
+      audit.rejected(413, "payload too large");
+      return c.json(anthropicError("invalid_request_error", e.message), 413);
+    }
     audit.rejected(400, "payload build failed");
     return c.json(anthropicError("invalid_request_error", String(e)), 400);
   }
@@ -292,7 +427,7 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
   const parsed = anthropicCountTokensRequestSchema.safeParse(raw);
   if (!parsed.success) {
     audit.rejected(422, "schema validation failed");
-    return c.json({ detail: parsed.error.issues }, 422);
+    return c.json(validationError(parsed.error.issues, raw), 422);
   }
   const requestData = parsed.data;
   audit.received("POST", "/v1/messages/count_tokens", {

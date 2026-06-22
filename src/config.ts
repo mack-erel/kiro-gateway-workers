@@ -109,7 +109,6 @@ export interface Env {
   /** Audit log: emit request / Kiro-payload / response bodies (off by default). */
   DEBUG_BODIES?: string;
   PROXY_API_KEY?: string;
-  MODELS_KV?: KVNamespace;
 }
 
 /** Resolved, typed configuration derived from {@link Env}. */
@@ -165,12 +164,32 @@ export function loadConfig(env: Env): Config {
     ? (handlingRaw as FakeReasoningHandling)
     : "as_reasoning_content";
 
+  const firstTokenTimeoutMs = num(env.FIRST_TOKEN_TIMEOUT, 15) * 1000;
+  const streamingReadTimeoutMs = num(env.STREAMING_READ_TIMEOUT, 300) * 1000;
+
+  // Mirror Python's _warn_timeout_configuration: the first-token timeout must
+  // be shorter than the inter-chunk read timeout, otherwise the read timeout
+  // can never fire (the first-token race always wins first). Warn, don't throw.
+  if (firstTokenTimeoutMs >= streamingReadTimeoutMs) {
+    console.warn(
+      JSON.stringify({
+        event: "config.warning",
+        message:
+          "FIRST_TOKEN_TIMEOUT >= STREAMING_READ_TIMEOUT; the stream read " +
+          "timeout will never trigger. Set FIRST_TOKEN_TIMEOUT below " +
+          "STREAMING_READ_TIMEOUT.",
+        firstTokenTimeoutMs,
+        streamingReadTimeoutMs,
+      }),
+    );
+  }
+
   return {
     apiRegion,
     // Python stores these in seconds; we keep milliseconds for setTimeout.
-    firstTokenTimeoutMs: num(env.FIRST_TOKEN_TIMEOUT, 15) * 1000,
+    firstTokenTimeoutMs,
     firstTokenMaxRetries: num(env.FIRST_TOKEN_MAX_RETRIES, 3),
-    streamingReadTimeoutMs: num(env.STREAMING_READ_TIMEOUT, 300) * 1000,
+    streamingReadTimeoutMs,
     fakeReasoningEnabled: truthy(env.FAKE_REASONING_ENABLED, true),
     fakeReasoningHandling,
     fakeReasoningMaxTokens: num(env.FAKE_REASONING_MAX_TOKENS, 4000),
