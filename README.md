@@ -39,8 +39,11 @@ All `/v1/*` endpoints require a `ksk_…` key. Without one, the gateway returns 
   (Anthropic).
 - **web_search** (MCP) — native (Path A) and streaming-interception (Path B).
 - **Tool calling**, including deterministic 64-char tool-name aliasing.
-- **Truncation recovery** — detects Kiro mid-stream truncation and injects
-  synthetic recovery messages on the next request.
+- **Truncation recovery** *(best-effort)* — detects Kiro mid-stream truncation
+  and injects synthetic recovery messages on the next request. State is held in
+  a per-isolate in-memory map, so on Workers it only fires when the follow-up
+  request lands on the same isolate — treat it as a bonus, not a guarantee. See
+  the note in `src/lib/truncation.ts`.
 - **Payload guard** — optional trimming under Kiro's ~615 KB limit.
 - **First-token timeout** with retry (re-fetch before the first byte is sent).
 - Token counting via `js-tiktoken` (cl100k_base) with a 1.15 Claude correction.

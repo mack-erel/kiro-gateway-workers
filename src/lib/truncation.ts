@@ -3,9 +3,19 @@
  * `truncation_state.py` into one module.
  *
  * Kiro truncates large tool-call payloads / content mid-stream. We detect this,
- * remember it (module-scope cache, no TTL — one-time retrieval clears it), and
- * on the next request inject a synthetic tool_result / user message so the model
- * can adapt. The module-scope Map is plain data only (Workers-safe).
+ * remember it, and on the NEXT request inject a synthetic tool_result / user
+ * message so the model can adapt.
+ *
+ * ⚠️ Workers limitation — best-effort only. The Python original ran as a single
+ * long-lived process, so its in-memory cache reliably bridged request N → N+1.
+ * On Workers the state lives in a module-scope Map inside a V8 isolate, and the
+ * runtime spins up / discards / load-balances across many isolates: the
+ * follow-up request is NOT guaranteed to hit the same isolate that saved the
+ * state, so the synthetic recovery message often won't fire. "Workers-safe"
+ * here means only that the Map holds plain data and never crashes — NOT that it
+ * persists across requests. Making this durable would require external storage
+ * (KV / Durable Object), intentionally dropped in favor of the stateless
+ * passthrough design. Treat recovery as a bonus when it happens, not a contract.
  */
 import { sha256Hex } from "./utils";
 
