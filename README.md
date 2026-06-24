@@ -1,5 +1,7 @@
 # Kiro Gateway (Workers)
 
+🌐 **English** · [한국어](docs/ko/readme.md)
+
 OpenAI / Anthropic-compatible proxy for the **Kiro API** (Amazon Q Developer / AWS
 CodeWhisperer backend), running on **Cloudflare Workers + Hono** (TypeScript).
 
@@ -25,6 +27,7 @@ loading — those modes from the original gateway are intentionally omitted.
 | POST | `/v1/chat/completions` | OpenAI Chat Completions (stream + non-stream) |
 | POST | `/v1/messages` | Anthropic Messages (stream + non-stream) |
 | POST | `/v1/messages/count_tokens` | Local token estimate (no upstream call) |
+| POST | `/mcp` | MCP server — `get_kiro_credits` tool (remaining credits) |
 
 All `/v1/*` endpoints require a `ksk_…` key. Without one, the gateway returns 401.
 
@@ -54,10 +57,6 @@ All `/v1/*` endpoints require a `ksk_…` key. Without one, the gateway returns 
 ```bash
 npm install
 
-# Create the KV namespace used to cache per-key model lists, then put the
-# returned id into wrangler.jsonc (kv_namespaces[0].id / preview_id).
-npx wrangler kv namespace create MODELS_KV
-
 # Local dev
 npm run dev
 
@@ -84,6 +83,33 @@ curl http://localhost:8787/v1/messages \
   -H "Content-Type: application/json" \
   -d '{"model":"claude-sonnet-4.5","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}'
 ```
+
+### MCP — remaining credits
+
+`POST /mcp` is a stateless MCP server (JSON-RPC 2.0) exposing a single read-only
+tool, `get_kiro_credits`. It authenticates with the caller's own `ksk_…` key via
+the request header and returns the current billing period's usage/limit/remaining
+credits, subscription plan, and next reset date.
+
+```bash
+# Direct call (for testing / scripting)
+curl https://kiro-api.static.mov/mcp \
+  -H "Authorization: Bearer ksk_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_kiro_credits","arguments":{}}}'
+```
+
+Register with an MCP client (e.g. Claude Code):
+
+```bash
+claude mcp add --transport http --scope user kiro-credits \
+  https://kiro-api.static.mov/mcp \
+  --header "Authorization: Bearer ksk_your_key"
+```
+
+The response carries both a human-readable text summary (`content`) and machine
+structured JSON (`structuredContent`: `plan`, `planType`, `nextResetDate`,
+`breakdown[]`).
 
 ## Configuration
 
@@ -136,13 +162,14 @@ src/
   config.ts           constants + loadConfig(env)
   types.ts            unified request types + KiroEvent
   auth/               kiroAuth, passthroughSession, middleware
-  routes/             openai, anthropic
+  routes/             openai, anthropic, mcp
   converters/         core (Kiro payload), openai, anthropic
   streaming/          core (KiroEvent pipeline), openai, anthropic
   parsers/            eventStream (AWS scraper), thinking (FSM)
   models/             openai, anthropic (zod schemas)
   lib/                modelResolver, cache, tokenizer, mcpTools,
-                      payloadGuards, truncation, errors, httpClient, utils
+                      usageLimits, payloadGuards, truncation, errors,
+                      httpClient, utils
 test/                 vitest unit tests
 ```
 
