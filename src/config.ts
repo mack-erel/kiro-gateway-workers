@@ -110,6 +110,8 @@ export interface Env {
   DEBUG_STREAM_EVENTS?: string;
   /** Audit log: emit request / Kiro-payload / response bodies (off by default). */
   DEBUG_BODIES?: string;
+  /** Audit log: per-body char cap when DEBUG_BODIES is on (default 8192). */
+  DEBUG_BODY_MAX_CHARS?: string;
   PROXY_API_KEY?: string;
 }
 
@@ -133,6 +135,7 @@ export interface Config {
   logLevel: string;
   debugStreamEvents: boolean;
   debugBodies: boolean;
+  debugBodyMaxChars: number;
   proxyApiKey: string | null;
 }
 
@@ -209,6 +212,7 @@ export function loadConfig(env: Env): Config {
     logLevel: (env.LOG_LEVEL || "INFO").toUpperCase(),
     debugStreamEvents: truthy(env.DEBUG_STREAM_EVENTS, false),
     debugBodies: truthy(env.DEBUG_BODIES, false),
+    debugBodyMaxChars: num(env.DEBUG_BODY_MAX_CHARS, 8192),
     proxyApiKey: env.PROXY_API_KEY || null,
   };
 }

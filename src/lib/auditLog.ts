@@ -28,6 +28,37 @@ const SEVERITY: Record<string, number> = {
   CRITICAL: 4,
 };
 
+/**
+ * Per-body cap for DEBUG_BODIES logging. Workers enforces a hard 256 KB total
+ * log budget PER REQUEST; a single full conversation body blows past that in one
+ * line, which then suppresses all subsequent lifecycle/stream logs for that
+ * request. Capping each body to a preview keeps the three body records
+ * (request / payload / response ≈ 24 KB total) well inside the budget so the
+ * rest of the audit trail survives. Override via DEBUG_BODY_MAX_CHARS.
+ */
+const DEFAULT_BODY_MAX_CHARS = 8 * 1024;
+
+/**
+ * Render a body for logging: serialize to JSON, and if it exceeds `maxChars`,
+ * return a structured marker with a head preview instead of the full value.
+ * Never throws — unserializable input falls back to String().
+ */
+function previewBody(body: unknown, maxChars: number): unknown {
+  let serialized: string;
+  try {
+    serialized = typeof body === "string" ? body : JSON.stringify(body);
+  } catch {
+    serialized = String(body);
+  }
+  if (serialized === undefined) serialized = String(body);
+  if (serialized.length <= maxChars) return body;
+  return {
+    _truncated: true,
+    totalChars: serialized.length,
+    preview: serialized.slice(0, maxChars),
+  };
+}
+
 /** Audit event type tags (the `event` field of each record). */
 export type AuditEvent =
   | "request.received"
@@ -48,6 +79,7 @@ export class AuditLogger {
   readonly requestId: string;
   private readonly debugStreamEvents: boolean;
   private readonly debugBodies: boolean;
+  private readonly bodyMaxChars: number;
   private readonly startMs: number;
   /** Minimum severity to emit, from LOG_LEVEL (DEBUG<INFO<WARNING<ERROR). */
   private readonly minSeverity: number;
@@ -56,6 +88,7 @@ export class AuditLogger {
     this.requestId = requestId ?? crypto.randomUUID();
     this.debugStreamEvents = config.debugStreamEvents;
     this.debugBodies = config.debugBodies;
+    this.bodyMaxChars = config.debugBodyMaxChars ?? DEFAULT_BODY_MAX_CHARS;
     this.startMs = Date.now();
     this.minSeverity = SEVERITY[config.logLevel] ?? SEVERITY.INFO;
   }
@@ -151,18 +184,18 @@ export class AuditLogger {
   /** Log the inbound client request body. No-op unless DEBUG_BODIES is on. */
   requestBody(body: unknown): void {
     if (!this.debugBodies) return;
-    this.emit("request.body", { body }, "info", true);
+    this.emit("request.body", { body: previewBody(body, this.bodyMaxChars) }, "info", true);
   }
 
   /** Log the assembled Kiro payload. No-op unless DEBUG_BODIES is on. */
   kiroPayload(payload: unknown): void {
     if (!this.debugBodies) return;
-    this.emit("kiro.payload", { payload }, "info", true);
+    this.emit("kiro.payload", { payload: previewBody(payload, this.bodyMaxChars) }, "info", true);
   }
 
   /** Log the outbound response body. No-op unless DEBUG_BODIES is on. */
   responseBody(body: unknown): void {
     if (!this.debugBodies) return;
-    this.emit("response.body", { body }, "info", true);
+    this.emit("response.body", { body: previewBody(body, this.bodyMaxChars) }, "info", true);
   }
 }
