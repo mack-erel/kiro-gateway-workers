@@ -853,7 +853,19 @@ export async function buildKiroPayload(args: {
   // bounces back as a misleading "Improperly formed request." 400.
   if (checkPayloadSize(payload) > config.maxPayloadBytes) {
     if (config.autoTrimPayload) {
-      trimPayloadToLimit(payload, config.maxPayloadBytes);
+      const stats = trimPayloadToLimit(payload, config.maxPayloadBytes);
+      // Auto-trim silently discards oldest history to fit Kiro's ~615 KB cap —
+      // log it so the context loss is visible (the model may otherwise seem to
+      // "forget" earlier turns with no trace).
+      if (stats.trimmed) {
+        logWarn("payload.autotrimmed", {
+          originalBytes: stats.originalBytes,
+          finalBytes: stats.finalBytes,
+          originalEntries: stats.originalEntries,
+          finalEntries: stats.finalEntries,
+          droppedEntries: stats.originalEntries - stats.finalEntries,
+        });
+      }
       // A single message can still exceed the limit after trimming history.
       const after = checkPayloadSize(payload);
       if (after > config.maxPayloadBytes) {
