@@ -21,7 +21,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export interface RequestOptions {
   /** Total retry attempts (defaults to MAX_RETRIES / FIRST_TOKEN_MAX_RETRIES). */
   maxRetries?: number;
-  /** Whether this is a streaming request (adds Connection: close). */
+  /** Whether this is a streaming request (affects the exhausted-retry status). */
   stream?: boolean;
   /** Abort signal for client-cancellation → upstream abort wiring. */
   signal?: AbortSignal;
@@ -55,8 +55,11 @@ export async function requestWithRetry(
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
+      // NB: no `Connection: close`. The Python original set it, but on Workers
+      // `Connection` is a forbidden header (silently dropped), and forcing close
+      // would defeat Cloudflare's keep-alive pool to the us-east-1 origin —
+      // adding a TCP+TLS handshake to every streaming request.
       const headers = getKiroHeaders(auth, auth.token);
-      if (opts.stream) headers["Connection"] = "close";
 
       const response = await fetch(url, {
         method: "POST",

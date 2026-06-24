@@ -10,14 +10,14 @@
   "observability": {
     "logs": {
       "enabled": true,
-      "invocation_logs": true,
+      "invocation_logs": true
     },
     "traces": {
-      "enabled": true,
-    },
+      "enabled": true
+    }
   },
   "limits": {
-    "cpu_ms": 300000,
+    "cpu_ms": 300000
   },
   "vars": {
     "KIRO_REGION": "us-east-1",
@@ -36,6 +36,6 @@
     "MODEL_CACHE_TTL": "3600",
     "LOG_LEVEL": "INFO",
     "DEBUG_STREAM_EVENTS": "false",
-    "DEBUG_BODIES": "false",
-  },
+    "DEBUG_BODIES": "false"
+  }
 }
