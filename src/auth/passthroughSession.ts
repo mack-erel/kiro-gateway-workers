@@ -11,8 +11,10 @@
  *    resolved model list). Never cache request-bound objects (fetch/streams/
  *    AbortController) here — that triggers "Cannot perform I/O on behalf of a
  *    different request" in Workers.
- *  - The model list is additionally cached in KV (wired up in the aux-features
- *    commit) so cold isolates avoid re-fetching from the management endpoint.
+ *  - The cache is bounded: each entry carries a TTL (so a stale model list is
+ *    eventually re-discovered) and the map is capped at a maximum entry count
+ *    (oldest-inserted evicted first) so a flood of distinct keys can't grow the
+ *    isolate's memory without limit.
  */
 import type { KiroAuthContext } from "../types";
 import { sha256Hex } from "../lib/utils";
@@ -29,7 +31,22 @@ export interface PassthroughSession {
   modelsData: Array<Record<string, any>>;
 }
 
-const _sessions = new Map<string, PassthroughSession>();
+/**
+ * Bound on cached sessions. The map holds small plain objects (auth context +
+ * model list), so the cap is generous; it exists to stop a flood of distinct
+ * keys from growing the isolate's memory without limit. TTL bounds staleness of
+ * the discovered model list.
+ */
+const SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour
+const MAX_SESSIONS = 1000;
+
+/** Internal cache entry: the session plus its expiry timestamp. */
+interface SessionEntry {
+  session: PassthroughSession;
+  expiresAt: number;
+}
+
+const _sessions = new Map<string, SessionEntry>();
 
 /** Short, log-safe cache key for an API key. */
 export async function sessionKeyHash(apiKey: string): Promise<string> {
@@ -88,27 +105,40 @@ export async function getPassthroughSession(
 ): Promise<PassthroughSession> {
   const hash = await sessionKeyHash(apiKey);
 
-  let session = _sessions.get(hash);
-  if (!session) {
-    const authContext = await createKiroAuthContext(apiKey, region);
-
-    let modelsData: Array<Record<string, any>>;
-    try {
-      const discovered = await fetchModelsViaManagement(apiKey, region);
-      modelsData = discovered.length ? discovered : FALLBACK_MODELS;
-    } catch (e) {
-      console.warn(
-        JSON.stringify({
-          event: "model.discovery.failed",
-          keyHash: hash,
-          message: e instanceof Error ? e.message : String(e),
-        }),
-      );
-      modelsData = FALLBACK_MODELS;
-    }
-
-    session = { authContext, modelsData };
-    _sessions.set(hash, session);
+  const existing = _sessions.get(hash);
+  if (existing && existing.expiresAt > Date.now()) {
+    return existing.session;
   }
+  // Expired or missing: drop the stale entry (if any) and rebuild below.
+  if (existing) _sessions.delete(hash);
+
+  const authContext = await createKiroAuthContext(apiKey, region);
+
+  let modelsData: Array<Record<string, any>>;
+  try {
+    const discovered = await fetchModelsViaManagement(apiKey, region);
+    modelsData = discovered.length ? discovered : FALLBACK_MODELS;
+  } catch (e) {
+    console.warn(
+      JSON.stringify({
+        event: "model.discovery.failed",
+        keyHash: hash,
+        message: e instanceof Error ? e.message : String(e),
+      }),
+    );
+    modelsData = FALLBACK_MODELS;
+  }
+
+  const session: PassthroughSession = { authContext, modelsData };
+
+  // Evict the oldest-inserted entry once the cap is reached. Map preserves
+  // insertion order, so the first key is the oldest. A re-inserted (refreshed)
+  // key moves to the end above via delete + set, so it isn't penalized.
+  if (_sessions.size >= MAX_SESSIONS) {
+    const oldest = _sessions.keys().next().value;
+    if (oldest !== undefined) _sessions.delete(oldest);
+  }
+  _sessions.set(hash, { session, expiresAt: Date.now() + SESSION_TTL_MS });
+
   return session;
 }

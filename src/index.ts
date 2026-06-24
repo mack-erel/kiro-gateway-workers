@@ -17,19 +17,49 @@ import { classifyNetworkError, formatErrorForUser } from "./lib/errors";
 
 const APP_VERSION = "0.1.0";
 
+/**
+ * Hard cap on the inbound request body, enforced from Content-Length BEFORE the
+ * body is read or parsed. Workers allows up to 100 MB, but Hono buffers the
+ * whole body in memory before `JSON.parse`, so an oversized request would
+ * pressure the 128 MB isolate. 10 MB comfortably fits legitimate multimodal
+ * requests (several base64 images) while rejecting abuse early — long before the
+ * assembled Kiro payload hits its own ~600 KB limit (KIRO_MAX_PAYLOAD_BYTES).
+ */
+const MAX_BODY_BYTES = 10 * 1024 * 1024;
+
 const app = new Hono<{ Bindings: Env }>();
 
-// CORS: allow all origins (browser clients + preflight OPTIONS), mirroring the
-// original gateway's permissive policy.
+// CORS: allow all origins (browser clients + preflight OPTIONS). Auth is carried
+// in explicit headers (Authorization / x-api-key), never in cookies, so there
+// are no ambient credentials to protect — and `credentials: true` is deliberately
+// omitted: browsers reject the `origin: "*"` + credentials combination outright,
+// which would break browser-based clients.
 app.use(
   "*",
   cors({
     origin: "*",
     allowMethods: ["GET", "POST", "OPTIONS"],
     allowHeaders: ["*"],
-    credentials: true,
   }),
 );
+
+// Reject oversized bodies up front, from Content-Length, before any handler
+// reads or buffers the body. Errors are rendered in the format matching the
+// target endpoint (Anthropic vs OpenAI).
+app.use("*", async (c, next) => {
+  const len = c.req.header("content-length");
+  if (len !== undefined) {
+    const bytes = Number(len);
+    if (Number.isFinite(bytes) && bytes > MAX_BODY_BYTES) {
+      const message =
+        `Request body of ${bytes} bytes exceeds the ${MAX_BODY_BYTES}-byte limit.`;
+      return isAnthropicPath(c.req.path)
+        ? c.json({ type: "error", error: { type: "invalid_request_error", message } }, 413)
+        : c.json({ error: { message, type: "invalid_request_error" } }, 413);
+    }
+  }
+  return next();
+});
 
 // Liveness probe.
 app.get("/", (c) =>
