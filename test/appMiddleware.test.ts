@@ -7,7 +7,9 @@ import app from "../src/index";
  * app directly via app.request(), without hitting any upstream.
  */
 
-const OVER_LIMIT = String(10 * 1024 * 1024 + 1); // one byte past the 10 MB cap
+// The test runtime reads wrangler.jsonc vars, where KIRO_MAX_REQUEST_BYTES is
+// 64 MiB. Pick values either side of that cap.
+const OVER_LIMIT = String(64 * 1024 * 1024 + 1); // one byte past the 64 MiB cap
 const UNDER_LIMIT = String(1024);
 
 describe("body-size guard (Content-Length)", () => {

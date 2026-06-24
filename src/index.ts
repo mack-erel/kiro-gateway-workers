@@ -18,14 +18,27 @@ import { classifyNetworkError, formatErrorForUser } from "./lib/errors";
 const APP_VERSION = "0.1.0";
 
 /**
- * Hard cap on the inbound request body, enforced from Content-Length BEFORE the
- * body is read or parsed. Workers allows up to 100 MB, but Hono buffers the
- * whole body in memory before `JSON.parse`, so an oversized request would
- * pressure the 128 MB isolate. 10 MB comfortably fits legitimate multimodal
- * requests (several base64 images) while rejecting abuse early — long before the
- * assembled Kiro payload hits its own ~600 KB limit (KIRO_MAX_PAYLOAD_BYTES).
+ * Default cap on the inbound request body, enforced from Content-Length BEFORE
+ * the body is read or parsed. Overridable via the KIRO_MAX_REQUEST_BYTES env var.
+ *
+ * Sized for this gateway's real traffic: agent clients (e.g. Claude Code) resend
+ * the FULL conversation on every turn, and just before context compaction a
+ * single legitimate request can reach tens of MB. The default must clear that
+ * comfortably — it is a trip-wire against absurdly large (hundreds of MB)
+ * requests, NOT a memory-safety device (Hono buffers + JSON.parse copies the
+ * body, so true isolate protection isn't achievable with a byte cap anyway).
+ * The assembled Kiro payload is separately bounded at ~600 KB
+ * (KIRO_MAX_PAYLOAD_BYTES).
  */
-const MAX_BODY_BYTES = 10 * 1024 * 1024;
+const DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024;
+
+/** Resolve the body-size cap from env, falling back to the default. */
+function maxBodyBytes(env: Env | undefined): number {
+  const raw = env?.KIRO_MAX_REQUEST_BYTES;
+  if (raw === undefined || raw === "") return DEFAULT_MAX_BODY_BYTES;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_BODY_BYTES;
+}
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -50,9 +63,10 @@ app.use("*", async (c, next) => {
   const len = c.req.header("content-length");
   if (len !== undefined) {
     const bytes = Number(len);
-    if (Number.isFinite(bytes) && bytes > MAX_BODY_BYTES) {
+    const limit = maxBodyBytes(c.env);
+    if (Number.isFinite(bytes) && bytes > limit) {
       const message =
-        `Request body of ${bytes} bytes exceeds the ${MAX_BODY_BYTES}-byte limit.`;
+        `Request body of ${bytes} bytes exceeds the ${limit}-byte limit.`;
       return isAnthropicPath(c.req.path)
         ? c.json({ type: "error", error: { type: "invalid_request_error", message } }, 413)
         : c.json({ error: { message, type: "invalid_request_error" } }, 413);

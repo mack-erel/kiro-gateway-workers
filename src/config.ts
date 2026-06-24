@@ -99,6 +99,8 @@ export interface Env {
   FAKE_REASONING_INITIAL_BUFFER_SIZE?: string;
   TRUNCATION_RECOVERY?: string;
   WEB_SEARCH_ENABLED?: string;
+  /** Inbound HTTP body cap (bytes), enforced from Content-Length in index.ts. */
+  KIRO_MAX_REQUEST_BYTES?: string;
   KIRO_MAX_PAYLOAD_BYTES?: string;
   AUTO_TRIM_PAYLOAD?: string;
   TOOL_DESCRIPTION_MAX_LENGTH?: string;
