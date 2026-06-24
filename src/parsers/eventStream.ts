@@ -13,6 +13,7 @@
  * actually more correct across multibyte chunk boundaries.
  */
 import { generateToolCallId } from "../lib/utils";
+import { logWarn } from "../lib/log";
 
 /** A tool call collected by the parser (OpenAI function-call shape). */
 export interface ParsedToolCall {
@@ -103,7 +104,8 @@ export function parseBracketToolCalls(responseText: string): ParsedToolCall[] {
         function: { name: funcName, arguments: JSON.stringify(args) },
       });
     } catch {
-      // Malformed args — skip, mirroring the Python warning-and-continue.
+      // Malformed args — the bracket-style tool call is dropped (data loss).
+      logWarn("toolcall.bracket.malformed", { tool: funcName });
     }
   }
   return toolCalls;
@@ -226,7 +228,13 @@ export class AwsEventStreamParser {
       try {
         data = JSON.parse(jsonStr);
       } catch {
-        continue; // Malformed — skip (Python logs a warning).
+        // A scraped event JSON didn't parse — the event is dropped. Log a
+        // bounded preview (no full body) so the loss is visible.
+        logWarn("event.malformed", {
+          eventType: earliestType,
+          preview: jsonStr.slice(0, 80),
+        });
+        continue;
       }
 
       const event = this.processEvent(data, earliestType as string);
@@ -311,6 +319,15 @@ export class AwsEventStreamParser {
         if (info.isTruncated) {
           tc._truncationDetected = true;
           tc._truncationInfo = info;
+        } else {
+          // Not truncated but still unparseable: genuine data loss — the tool
+          // call's arguments are discarded. Truncation is tracked separately
+          // (recovery state), so only log the malformed case here.
+          logWarn("toolcall.args.malformed", {
+            tool: tc.function.name,
+            reason: info.reason,
+            argChars: args.length,
+          });
         }
         tc.function.arguments = "{}";
       }

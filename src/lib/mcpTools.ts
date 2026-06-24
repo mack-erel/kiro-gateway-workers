@@ -11,6 +11,7 @@
 import type { KiroAuthContext } from "../types";
 import { getKiroHeaders, generateCompletionId } from "./utils";
 import { countTokens, countMessageTokens } from "./tokenizer";
+import { logError } from "./log";
 
 const ALPHANUM =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -88,7 +89,9 @@ export async function callKiroMcpApi(
 
     const mcpResponse = (await response.json()) as Record<string, any>;
     if (mcpResponse["error"] != null) {
-      console.error("MCP API returned error");
+      logError("websearch.mcp.error", {
+        message: String((mcpResponse["error"] as any)?.["message"] ?? mcpResponse["error"]),
+      });
       return { toolUseId: null, results: null };
     }
 
@@ -97,7 +100,9 @@ export async function callKiroMcpApi(
     const results = JSON.parse(resultText); // content text is a JSON string
     return { toolUseId, results };
   } catch (e) {
-    console.error("MCP API call failed", e);
+    logError("websearch.mcp.failed", {
+      message: e instanceof Error ? e.message : String(e),
+    });
     return { toolUseId: null, results: null };
   }
 }

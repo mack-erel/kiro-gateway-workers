@@ -13,6 +13,7 @@ import type {
   UnifiedTool,
 } from "../types";
 import { checkPayloadSize, trimPayloadToLimit, PayloadTooLargeError } from "../lib/payloadGuards";
+import { logWarn } from "../lib/log";
 
 export interface KiroPayloadResult {
   payload: Record<string, any>;
@@ -81,7 +82,7 @@ export function extractImagesFromContent(content: unknown): ExtractedImage[] {
           if (data) images.push({ media_type: mediaType, data });
         }
       } else if (url.startsWith("http")) {
-        console.warn("URL-based images are not supported by Kiro API, skipping");
+        logWarn("image.dropped", { format: "openai", source: "url", reason: "Kiro API accepts inline data: images only" });
       }
     } else if (itemType === "image") {
       const source = (item as any).source;
@@ -91,7 +92,7 @@ export function extractImagesFromContent(content: unknown): ExtractedImage[] {
         const data = source.data ?? "";
         if (data) images.push({ media_type: mediaType, data });
       } else if (source.type === "url") {
-        console.warn("URL-based images are not supported by Kiro API, skipping");
+        logWarn("image.dropped", { format: "anthropic", source: "url", reason: "Kiro API accepts base64 images only" });
       }
     }
   }
