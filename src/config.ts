@@ -150,6 +150,18 @@ const num = (v: string | undefined, dflt: number): number => {
   return Number.isFinite(n) ? n : dflt;
 };
 
+/**
+ * Like {@link num} but clamps to a minimum. Used for tunables where a
+ * non-positive value would silently break the gateway (e.g. a zero payload cap
+ * fails every request; a non-positive cache TTL makes the cache permanently
+ * stale). Out-of-range values fall back to the default rather than the raw
+ * input.
+ */
+const numMin = (v: string | undefined, dflt: number, min: number): number => {
+  const n = num(v, dflt);
+  return n >= min ? n : dflt;
+};
+
 const HANDLING_VALUES: FakeReasoningHandling[] = [
   "as_reasoning_content",
   "remove",
@@ -205,10 +217,12 @@ export function loadConfig(env: Env): Config {
     ),
     truncationRecovery: truthy(env.TRUNCATION_RECOVERY, true),
     webSearchEnabled: truthy(env.WEB_SEARCH_ENABLED, true),
-    maxPayloadBytes: num(env.KIRO_MAX_PAYLOAD_BYTES, 600000),
+    // Clamp to positive: a zero/negative payload cap would fail every request.
+    maxPayloadBytes: numMin(env.KIRO_MAX_PAYLOAD_BYTES, 600000, 1),
     autoTrimPayload: truthy(env.AUTO_TRIM_PAYLOAD, false),
-    toolDescriptionMaxLength: num(env.TOOL_DESCRIPTION_MAX_LENGTH, 10000),
-    modelCacheTtlMs: num(env.MODEL_CACHE_TTL, 3600) * 1000,
+    toolDescriptionMaxLength: numMin(env.TOOL_DESCRIPTION_MAX_LENGTH, 10000, 1),
+    // Clamp to non-negative: a negative TTL would make the cache permanently stale.
+    modelCacheTtlMs: numMin(env.MODEL_CACHE_TTL, 3600, 0) * 1000,
     logLevel: (env.LOG_LEVEL || "INFO").toUpperCase(),
     debugStreamEvents: truthy(env.DEBUG_STREAM_EVENTS, false),
     debugBodies: truthy(env.DEBUG_BODIES, false),

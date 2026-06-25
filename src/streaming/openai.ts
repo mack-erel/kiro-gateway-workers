@@ -30,6 +30,10 @@ import {
   saveToolTruncation,
   saveContentTruncation,
 } from "../lib/truncation";
+import {
+  normalizeStopSequences,
+  StopSequenceMatcher,
+} from "../lib/stopSequences";
 import type { KiroAuthContext } from "../types";
 import type { AuditLogger } from "../lib/auditLog";
 
@@ -45,6 +49,8 @@ export interface OpenAIStreamArgs {
   requestMessages?: Record<string, any>[] | null;
   requestTools?: Record<string, any>[] | null;
   toolNameMap?: Record<string, string>;
+  /** OpenAI `stop` — honored by truncating output at the first match. */
+  stop?: string | string[] | null;
   audit?: AuditLogger;
 }
 
@@ -66,6 +72,12 @@ export async function* streamKiroToOpenAI(
   let fullContent = "";
   let fullThinking = "";
   const toolCallsFromStream: ParsedToolCall[] = [];
+
+  // Stop-sequence handling. Kiro has no native stop concept, so we truncate
+  // streamed content at the first match. The matcher holds back any trailing
+  // slice that could still grow into a stop sequence across chunk boundaries.
+  const stopMatcher = new StopSequenceMatcher(normalizeStopSequences(args.stop));
+  let stopTriggered = false;
 
   const chunk = (delta: Record<string, any>): string => {
     if (firstChunk) {
@@ -90,8 +102,17 @@ export async function* streamKiroToOpenAI(
     args.audit,
   )) {
     if (event.type === "content" && event.content) {
-      fullContent += event.content;
-      yield chunk({ content: event.content });
+      // Route content through the stop matcher: emit only the provably-safe
+      // prefix, hold back a possible partial match, and cut off at a full match.
+      const r = stopMatcher.push(event.content);
+      if (r.emit) {
+        fullContent += r.emit;
+        yield chunk({ content: r.emit });
+      }
+      if (r.stopped) {
+        stopTriggered = true;
+        break;
+      }
     } else if (event.type === "thinking" && event.thinkingContent) {
       fullThinking += event.thinkingContent;
       const delta =
@@ -138,19 +159,37 @@ export async function* streamKiroToOpenAI(
     }
   }
 
+  // Stream ended without hitting a stop sequence: release any held-back tail.
+  if (!stopTriggered) {
+    const tail = stopMatcher.flush();
+    if (tail) {
+      fullContent += tail;
+      yield chunk({ content: tail });
+    }
+  }
+
   // Truncation detection (missing completion signals).
   const streamCompletedNormally = meteringData != null || contextUsagePercentage != null;
-  const bracketCalls = parseBracketToolCalls(fullContent);
-  let allToolCalls = deduplicateToolCalls([...toolCallsFromStream, ...bracketCalls]);
+  // When a stop sequence fired, generation ended deliberately mid-content — do
+  // not re-interpret the partial text as bracket tool calls.
+  const bracketCalls = stopTriggered ? [] : parseBracketToolCalls(fullContent);
+  let allToolCalls = stopTriggered
+    ? []
+    : deduplicateToolCalls([...toolCallsFromStream, ...bracketCalls]);
   const contentWasTruncated =
-    !streamCompletedNormally && fullContent.length > 0 && allToolCalls.length === 0;
+    !stopTriggered &&
+    !streamCompletedNormally &&
+    fullContent.length > 0 &&
+    allToolCalls.length === 0;
 
-  // finish_reason: length (truncation) > tool_calls > stop.
-  const finishReason = contentWasTruncated
-    ? "length"
-    : allToolCalls.length
-      ? "tool_calls"
-      : "stop";
+  // finish_reason: stop sequence > length (truncation) > tool_calls > stop.
+  const finishReason = stopTriggered
+    ? "stop"
+    : contentWasTruncated
+      ? "length"
+      : allToolCalls.length
+        ? "tool_calls"
+        : "stop";
 
   // Token counting.
   const completionTokens = countTokens(fullContent + fullThinking);

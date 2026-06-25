@@ -10,6 +10,23 @@
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 
+/**
+ * Length-independent, content-comparison-constant-time string equality.
+ * `===` short-circuits on the first differing byte and on length mismatch,
+ * leaking a (tiny) timing signal about a server secret. This XOR-accumulates
+ * over the full length of both strings so the comparison time does not depend
+ * on where/whether they differ. The length difference is folded into the
+ * accumulator so unequal-length inputs still return false without an early out.
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+  let diff = a.length ^ b.length;
+  const max = Math.max(a.length, b.length);
+  for (let i = 0; i < max; i++) {
+    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  }
+  return diff === 0;
+}
+
 /** Result of a successful authentication. */
 export interface AuthResult {
   /** The bearer token: a ksk_ API key (passthrough) or the PROXY_API_KEY. */
@@ -51,13 +68,24 @@ export function authenticate(
     throw new HTTPException(401, { message: "Invalid or missing API Key" });
   }
 
+  // Defense-in-depth: reject tokens carrying control characters before the
+  // value is ever interpolated into an outbound Authorization header. The
+  // Workers runtime already rejects CR/LF in header values, but validating the
+  // token shape here removes the reliance on that single guard (and rejects
+  // malformed input with a clear 401 instead of a later upstream throw).
+  if (/[\x00-\x1F\x7F]/.test(token)) {
+    throw new HTTPException(401, { message: "Invalid API Key" });
+  }
+
   // Passthrough mode: client supplies its own Kiro API key.
   if (token.startsWith("ksk_")) {
     return { token, isPassthrough: true };
   }
 
-  // Legacy/server mode: validate against the configured proxy key.
-  if (proxyApiKey && token === proxyApiKey) {
+  // Legacy/server mode: validate against the configured proxy key using a
+  // constant-time compare so the shared secret isn't exposed to a timing
+  // side-channel.
+  if (proxyApiKey && timingSafeEqual(token, proxyApiKey)) {
     return { token, isPassthrough: false };
   }
 

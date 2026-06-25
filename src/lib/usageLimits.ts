@@ -55,7 +55,11 @@ function epochSecondsToIso(v: unknown): string | null {
   if (n === null) return null;
   // Upstream sends seconds (e.g. 1.782864e9). Guard against ms just in case.
   const ms = n > 1e12 ? n : n * 1000;
-  return new Date(ms).toISOString();
+  const d = new Date(ms);
+  // An absurd-but-finite magnitude (e.g. 1e300) yields an Invalid Date whose
+  // toISOString() throws RangeError. Validate before formatting.
+  if (!Number.isFinite(d.getTime())) return null;
+  return d.toISOString();
 }
 
 /**

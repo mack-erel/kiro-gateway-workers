@@ -275,7 +275,14 @@ export class AwsEventStreamParser {
   private processContent(data: Record<string, unknown>): ParsedEvent | null {
     if (data["followupPrompt"]) return null;
     const content = (data["content"] as string) ?? "";
-    if (content === this.lastContent) return null; // dedup repeats
+    if (content === this.lastContent) {
+      // Consecutive-duplicate dedup (faithful port of the Python parser). This
+      // can drop a LEGITIMATE repeated token (e.g. the model emits "ha" twice).
+      // We keep the behavior to match upstream double-emission quirks but log
+      // non-empty drops so the (rare) data loss is observable rather than silent.
+      if (content) logWarn("stream.content.deduped", { length: content.length });
+      return null;
+    }
     this.lastContent = content;
     return { type: "content", data: content };
   }

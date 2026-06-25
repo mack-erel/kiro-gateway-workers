@@ -45,6 +45,11 @@ function openaiError(message: string, type = "kiro_api_error", code: number | st
   return { error: { message, type, code, param: null } };
 }
 
+/** Serialize an object as a single OpenAI SSE `data:` frame. */
+function sse(obj: unknown): string {
+  return `data: ${JSON.stringify(obj)}\n\n`;
+}
+
 /**
  * 422 validation-error body, mirroring Python's `sanitize_validation_errors`:
  * the Zod issues plus a truncated echo of the raw request body.
@@ -159,6 +164,22 @@ openaiRoutes.get("/v1/models", async (c) => {
   });
 });
 
+// POST /v1/embeddings — explicitly unsupported. The Kiro backend has no
+// embeddings capability, so rather than letting this fall through to a generic
+// 404 (which an OpenAI client surfaces as a confusing "route not found"), we
+// return a clear, OpenAI-shaped 501 so the SDK reports the real reason.
+openaiRoutes.post("/v1/embeddings", (c) =>
+  c.json(
+    openaiError(
+      "The /v1/embeddings endpoint is not supported by this gateway. The Kiro " +
+        "backend provides chat/completions only.",
+      "invalid_request_error",
+      501,
+    ),
+    501,
+  ),
+);
+
 // POST /v1/chat/completions
 openaiRoutes.post("/v1/chat/completions", async (c) => {
   const config = loadConfig(c.env);
@@ -179,7 +200,16 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
     );
   }
 
-  const raw = await c.req.json();
+  let raw: unknown;
+  try {
+    raw = await c.req.json();
+  } catch {
+    audit.rejected(400, "invalid JSON body");
+    return c.json(
+      openaiError("Invalid JSON in request body.", "invalid_request_error", 400),
+      400,
+    );
+  }
   const parsed = chatCompletionRequestSchema.safeParse(raw);
   if (!parsed.success) {
     audit.rejected(422, "schema validation failed");
@@ -192,6 +222,34 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
     messageCount: requestData.messages.length,
   });
   audit.requestBody(raw);
+
+  // Reject parameters the Kiro backend genuinely cannot satisfy, rather than
+  // accepting them and silently returning something different from what was
+  // asked. n>1 would require N independent upstream generations (a real cost /
+  // credit multiplier the caller hasn't opted into), and logprobs are never
+  // exposed by the upstream model, so they cannot be produced at all.
+  if (typeof requestData.n === "number" && requestData.n > 1) {
+    audit.rejected(400, `unsupported n=${requestData.n}`);
+    return c.json(
+      openaiError(
+        "This gateway supports only n=1; request multiple completions separately.",
+        "invalid_request_error",
+        400,
+      ),
+      400,
+    );
+  }
+  if (requestData.logprobs === true) {
+    audit.rejected(400, "unsupported logprobs");
+    return c.json(
+      openaiError(
+        "logprobs are not supported: the upstream model does not expose token log probabilities.",
+        "invalid_request_error",
+        400,
+      ),
+      400,
+    );
+  }
 
   // Truncation recovery preprocessing.
   requestData.messages = (await applyTruncationRecovery(
@@ -227,8 +285,11 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
       audit.rejected(413, "payload too large");
       return c.json(openaiError(e.message, "invalid_request_error", 413), 413);
     }
-    audit.rejected(400, "payload build failed");
-    return c.json(openaiError(String(e), "invalid_request_error", 400), 400);
+    audit.rejected(400, `payload build failed: ${String(e)}`);
+    return c.json(
+      openaiError("Request could not be processed.", "invalid_request_error", 400),
+      400,
+    );
   }
   audit.kiroPayload(payload);
   const toolNameMap = await buildToolNameReverseMap(
@@ -265,6 +326,21 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
   if (requestData.stream) {
     // Stream with first-token retry: retry only before any byte is emitted.
     const encoder = new TextEncoder();
+    // Emit an OpenAI-style error as an SSE frame, then terminate the stream
+    // cleanly with [DONE]. Using controller.error() instead would abort the
+    // HTTP response mid-stream with no parseable error and no [DONE] sentinel,
+    // which an OpenAI SDK surfaces as a generic "connection error" rather than
+    // the actual upstream message. Mirrors the Anthropic route's error frame.
+    const emitErrorAndClose = (
+      controller: ReadableStreamDefaultController<Uint8Array>,
+      message: string,
+      type: string,
+      code: number | string | null,
+    ) => {
+      controller.enqueue(encoder.encode(sse(openaiError(message, type, code))));
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+    };
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         let response = initial;
@@ -280,6 +356,7 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
               requestMessages: messagesForTokenizer,
               requestTools: toolsForTokenizer,
               toolNameMap,
+              stop: requestData.stop,
               audit,
             })) {
               controller.enqueue(encoder.encode(chunk));
@@ -290,24 +367,42 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
           } catch (e) {
             if (e instanceof FirstTokenTimeoutError && attempt < config.firstTokenMaxRetries - 1) {
               audit.upstreamRetry(attempt + 1, config.firstTokenMaxRetries);
+              // Cancel the timed-out upstream body before re-fetching so the
+              // stale connection is released instead of dangling until GC. The
+              // generator's finally already released the reader lock, so the
+              // body is cancellable here.
+              await response.body?.cancel().catch(() => {});
               const retry = await doFetch();
               audit.upstreamResponse(retry.status);
               if (retry.status !== 200) {
                 audit.error("upstream retry non-200", { status: retry.status });
-                controller.error(new Error(`Upstream error ${retry.status}`));
+                emitErrorAndClose(
+                  controller,
+                  `Upstream API error ${retry.status}`,
+                  "kiro_api_error",
+                  retry.status,
+                );
                 return;
               }
               response = retry;
               continue;
             }
             audit.error("stream error", { message: e instanceof Error ? e.message : String(e) });
-            controller.error(e);
+            emitErrorAndClose(
+              controller,
+              e instanceof Error ? e.message : String(e),
+              e instanceof FirstTokenTimeoutError ? "timeout_error" : "kiro_api_error",
+              null,
+            );
             return;
           }
         }
         audit.error("first-token retries exhausted");
-        controller.error(
-          new Error(`Model did not respond after ${config.firstTokenMaxRetries} attempts`),
+        emitErrorAndClose(
+          controller,
+          `Model did not respond after ${config.firstTokenMaxRetries} attempts`,
+          "timeout_error",
+          null,
         );
       },
       cancel() {
@@ -336,6 +431,7 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
     requestMessages: messagesForTokenizer,
     requestTools: toolsForTokenizer,
     toolNameMap,
+    stop: requestData.stop,
     audit,
   });
   audit.responseBody(openaiResponse);

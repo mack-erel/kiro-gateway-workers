@@ -170,20 +170,31 @@ export interface RequestTokenEstimate {
   totalTokens: number;
 }
 
-/** Estimate total request tokens (messages + tools + system). */
+/**
+ * Estimate total request tokens (messages + tools + system).
+ *
+ * When the Claude correction is applied, it is applied ONCE to the combined
+ * total rather than to each sub-total independently. Flooring three separate
+ * sub-totals (`Math.floor(x*1.15)` each) compounds a downward rounding bias of
+ * up to ~3 tokens — wrong direction for a guard meant to OVER-estimate so the
+ * payload stays under Kiro's limit. We sum the raw (uncorrected) counts, then
+ * correct the single total.
+ */
 export function estimateRequestTokens(
   messages: AnyRecord[],
   tools?: AnyRecord[] | null,
   systemPrompt?: unknown,
   applyClaudeCorrection = true,
 ): RequestTokenEstimate {
-  const messagesTokens = countMessageTokens(messages, applyClaudeCorrection);
-  const toolsTokens = countToolsTokens(tools, applyClaudeCorrection);
-  const systemTokens = countSystemTokens(systemPrompt, applyClaudeCorrection);
+  const rawMessages = countMessageTokens(messages, false);
+  const rawTools = countToolsTokens(tools, false);
+  const rawSystem = countSystemTokens(systemPrompt, false);
+  const correct = (n: number) =>
+    applyClaudeCorrection ? Math.floor(n * CLAUDE_CORRECTION_FACTOR) : n;
   return {
-    messagesTokens,
-    toolsTokens,
-    systemTokens,
-    totalTokens: messagesTokens + toolsTokens + systemTokens,
+    messagesTokens: correct(rawMessages),
+    toolsTokens: correct(rawTools),
+    systemTokens: correct(rawSystem),
+    totalTokens: correct(rawMessages + rawTools + rawSystem),
   };
 }
