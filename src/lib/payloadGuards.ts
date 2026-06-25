@@ -123,13 +123,54 @@ function repairOrphanedToolResults(history: Json[]): void {
 }
 
 /**
+ * Re-attach the system prompt to the first surviving user message after
+ * trimming. The system prompt is prepended (by the converter) to the FIRST
+ * history user message; trimming shifts oldest entries off the front, so the
+ * message carrying the system prompt is exactly what gets discarded first.
+ * Without this, auto-trim silently drops the system prompt — the model loses
+ * its instructions with no trace. We re-prepend it to whatever user message is
+ * now first (history, or the current message if history was fully trimmed).
+ */
+function reattachSystemPrompt(
+  payload: Json,
+  history: Json[],
+  systemPrompt: string,
+): void {
+  const prefix = `${systemPrompt}\n\n`;
+  // Prefer the first user message still in history.
+  for (const entry of history) {
+    const userMsg = entry["userInputMessage"];
+    if (userMsg) {
+      const content = typeof userMsg["content"] === "string" ? userMsg["content"] : "";
+      if (!content.startsWith(systemPrompt)) {
+        userMsg["content"] = prefix + content;
+      }
+      return;
+    }
+  }
+  // History fully trimmed: fall back to the current message.
+  const current = payload["conversationState"]?.["currentMessage"]?.["userInputMessage"];
+  if (current) {
+    const content = typeof current["content"] === "string" ? current["content"] : "";
+    if (!content.startsWith(systemPrompt)) {
+      current["content"] = prefix + content;
+    }
+  }
+}
+
+/**
  * Trim oldest history entries (in pairs) so the serialized payload fits under
  * `maxBytes`. Keeps at least 2 entries, aligns to a user boundary, and repairs
  * orphaned toolResults afterward. Mutates `payload`.
+ *
+ * When `systemPrompt` is provided, it is re-attached to the first surviving
+ * user message after trimming — the system prompt rides on the first history
+ * user message, which is the first thing trimmed, so it would otherwise be lost.
  */
 export function trimPayloadToLimit(
   payload: Json,
   maxBytes: number,
+  systemPrompt?: string,
 ): PayloadTrimStats {
   const originalBytes = checkPayloadSize(payload);
   const history: Json[] | undefined =
@@ -156,6 +197,12 @@ export function trimPayloadToLimit(
 
   alignToUserMessage(history);
   repairOrphanedToolResults(history);
+
+  // Re-attach the system prompt only if trimming actually removed entries (the
+  // original system-prompt-bearing message may have been shifted off).
+  if (systemPrompt && originalEntries !== history.length) {
+    reattachSystemPrompt(payload, history, systemPrompt);
+  }
 
   return {
     originalBytes,

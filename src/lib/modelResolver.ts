@@ -5,7 +5,7 @@
  * cache → hidden models → pass-through. Principle: gateway, not gatekeeper —
  * resolve() never throws; unknown models pass through for Kiro to judge.
  */
-import { FALLBACK_MODELS } from "../config";
+import { FALLBACK_MODELS, MODEL_ALIASES } from "../config";
 import type { ModelInfoCache } from "./cache";
 
 /** Valid runtime model IDs (from FALLBACK_MODELS, single source of truth). */
@@ -34,8 +34,9 @@ export interface ModelResolution {
 export function normalizeModelName(name: string): string {
   if (!name) return name;
 
-  // Strip context-window suffix (e.g. [1m], [200k]) — client-side indicator.
-  name = name.replace(/\[\d+[mk]\]$/i, "");
+  // Strip a trailing context-window suffix (e.g. [1m], [200k]) and any
+  // whitespace before it — clients sometimes send "claude-opus-4 [1m]".
+  name = name.replace(/\s*\[\d+[mk]\]\s*$/i, "").trim();
 
   const lower = name.toLowerCase();
 
@@ -72,14 +73,22 @@ export function normalizeModelName(name: string): string {
 }
 
 /**
- * Lightweight helper for converters: normalize + hidden-model lookup, returning
- * the model ID to send to Kiro. Mirrors `get_model_id_for_kiro`.
+ * Lightweight helper for converters: alias → normalize → hidden-model lookup,
+ * returning the model ID to send to Kiro. Mirrors `get_model_id_for_kiro` and
+ * the same alias→normalize→hidden ordering as {@link ModelResolver.resolve}.
+ *
+ * Applying MODEL_ALIASES here is essential: /v1/models advertises alias names
+ * (e.g. `auto-kiro`) via ModelResolver, so a client may legitimately request
+ * one. Without alias resolution the raw alias would be forwarded to Kiro, which
+ * does not recognize it — the advertised model would be unusable.
  */
 export function getModelIdForKiro(
   modelName: string,
   hiddenModels: Record<string, string>,
+  aliases: Record<string, string> = MODEL_ALIASES,
 ): string {
-  const normalized = normalizeModelName(modelName);
+  const aliased = aliases[modelName] ?? modelName;
+  const normalized = normalizeModelName(aliased);
   const internal = hiddenModels[normalized] ?? normalized;
   return toRuntimeModelId(internal);
 }

@@ -39,7 +39,7 @@ export function extractTextContent(content: unknown): string {
         if (type === "text") {
           parts.push((item as any).text ?? "");
         } else if ("text" in (item as any)) {
-          parts.push((item as any).text);
+          parts.push((item as any).text ?? "");
         }
       } else if (typeof item === "string") {
         parts.push(item);
@@ -349,9 +349,19 @@ export function convertImagesToKiroFormat(
       }
     }
 
-    const formatStr = mediaType.includes("/")
-      ? mediaType.split("/").pop()!
-      : mediaType;
+    // Kiro/Bedrock accepts a fixed set of raster formats. Deriving the format
+    // from the media type naively yields e.g. "svg+xml" for "image/svg+xml",
+    // which Kiro rejects. Map to an accepted format, defaulting unknown types to
+    // "png" (the safest common denominator) and logging the coercion.
+    const ACCEPTED_FORMATS = new Set(["png", "jpeg", "gif", "webp"]);
+    let formatStr = mediaType.includes("/")
+      ? mediaType.split("/").pop()!.toLowerCase()
+      : mediaType.toLowerCase();
+    if (formatStr === "jpg") formatStr = "jpeg";
+    if (!ACCEPTED_FORMATS.has(formatStr)) {
+      logWarn("image.format.unsupported", { mediaType, derived: formatStr, coercedTo: "png" });
+      formatStr = "png";
+    }
     kiroImages.push({ format: formatStr, source: { bytes: data } });
   }
   return kiroImages;
@@ -408,7 +418,20 @@ export function extractToolUsesFromMessage(
         const args = func["arguments"] ?? "{}";
         let input: unknown;
         if (typeof args === "string") {
-          input = args ? JSON.parse(args) : {};
+          // LLM-generated tool arguments are frequently invalid JSON (trailing
+          // commas, unescaped chars, mid-stream truncation). A single bad
+          // arguments string in conversation HISTORY must not throw and fail the
+          // whole request — fall back to {} (matching the streaming parsers'
+          // resilience). The raw string is preserved under _raw for debugging.
+          if (!args) {
+            input = {};
+          } else {
+            try {
+              input = JSON.parse(args);
+            } catch {
+              input = { _raw: args };
+            }
+          }
         } else {
           input = args ? args : {};
         }
@@ -711,10 +734,31 @@ export async function buildKiroPayload(args: {
   );
 
   // Alias tool names over Kiro's 64-char limit (deterministic, async hashing).
+  // Guard against the (astronomically unlikely but unhandled) case where an
+  // alias collides with another tool's final name — without a guard the forward
+  // map would silently overwrite and two distinct tools would merge into one.
+  // On collision, append a short disambiguating counter while staying ≤64 chars.
   const toolNameForwardMap: Record<string, string> = {};
   if (processedTools) {
+    const usedNames = new Set<string>();
     for (const tool of processedTools) {
-      const alias = await shortenToolName(tool.name);
+      let alias = await shortenToolName(tool.name);
+      if (usedNames.has(alias)) {
+        let counter = 1;
+        let candidate: string;
+        do {
+          const suffix = `_${counter}`;
+          candidate = alias.slice(0, TOOL_NAME_MAX_LENGTH - suffix.length) + suffix;
+          counter += 1;
+        } while (usedNames.has(candidate) && counter < 1000);
+        logWarn("toolname.alias.collision", {
+          original: tool.name,
+          collidedAlias: alias,
+          resolvedAlias: candidate,
+        });
+        alias = candidate;
+      }
+      usedNames.add(alias);
       if (alias !== tool.name) {
         toolNameForwardMap[tool.name] = alias;
         tool.name = alias;
@@ -853,7 +897,7 @@ export async function buildKiroPayload(args: {
   // bounces back as a misleading "Improperly formed request." 400.
   if (checkPayloadSize(payload) > config.maxPayloadBytes) {
     if (config.autoTrimPayload) {
-      const stats = trimPayloadToLimit(payload, config.maxPayloadBytes);
+      const stats = trimPayloadToLimit(payload, config.maxPayloadBytes, fullSystemPrompt);
       // Auto-trim silently discards oldest history to fit Kiro's ~615 KB cap —
       // log it so the context loss is visible (the model may otherwise seem to
       // "forget" earlier turns with no trace).

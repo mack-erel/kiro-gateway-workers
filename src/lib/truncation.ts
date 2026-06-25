@@ -65,6 +65,32 @@ export interface ContentTruncationInfo {
 const toolTruncationCache = new Map<string, ToolTruncationInfo>();
 const contentTruncationCache = new Map<string, ContentTruncationInfo>();
 
+// Bounds for the in-memory caches. Because the follow-up request frequently
+// lands on a DIFFERENT isolate (see the module header), saved entries are often
+// never retrieved and would otherwise accumulate for the isolate's lifetime.
+// We cap both size and age so a hot, long-lived isolate can't grow without
+// bound — mirroring the bounded session cache. Entries are evicted oldest-first
+// (insertion order via Map) and swept by age on every save.
+const MAX_CACHE_ENTRIES = 1000;
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
+ * Drop entries older than the TTL, then evict oldest entries (Map preserves
+ * insertion order) until the cache is within the size cap. Run on every save so
+ * cleanup cost is amortized and bounded.
+ */
+function evict<T extends { timestamp: number }>(cache: Map<string, T>): void {
+  const now = Date.now();
+  for (const [key, val] of cache) {
+    if (now - val.timestamp > CACHE_TTL_MS) cache.delete(key);
+  }
+  while (cache.size > MAX_CACHE_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
 /** Save truncation info for a tool call (keyed by tool_call_id). */
 export function saveToolTruncation(
   toolCallId: string,
@@ -77,6 +103,7 @@ export function saveToolTruncation(
     truncationInfo,
     timestamp: Date.now(),
   });
+  evict(toolTruncationCache);
 }
 
 /** Retrieve and remove tool truncation info (one-time). */
@@ -99,6 +126,7 @@ export async function saveContentTruncation(content: string): Promise<string> {
     contentPreview: content.slice(0, 200),
     timestamp: Date.now(),
   });
+  evict(contentTruncationCache);
   return hash;
 }
 

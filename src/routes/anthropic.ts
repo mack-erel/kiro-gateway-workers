@@ -242,7 +242,16 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     );
   }
 
-  const raw = await c.req.json();
+  let raw: unknown;
+  try {
+    raw = await c.req.json();
+  } catch {
+    audit.rejected(400, "invalid JSON body");
+    return c.json(
+      anthropicError("invalid_request_error", "Invalid JSON in request body."),
+      400,
+    );
+  }
   const parsed = anthropicMessagesRequestSchema.safeParse(raw);
   if (!parsed.success) {
     audit.rejected(422, "schema validation failed");
@@ -292,8 +301,11 @@ anthropicRoutes.post("/v1/messages", async (c) => {
       audit.rejected(413, "payload too large");
       return c.json(anthropicError("invalid_request_error", e.message), 413);
     }
-    audit.rejected(400, "payload build failed");
-    return c.json(anthropicError("invalid_request_error", String(e)), 400);
+    audit.rejected(400, `payload build failed: ${String(e)}`);
+    return c.json(
+      anthropicError("invalid_request_error", "Request could not be processed."),
+      400,
+    );
   }
   audit.kiroPayload(payload);
   const toolNameMap = requestData.tools
@@ -333,6 +345,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     requestTools: toolsForTokenizer,
     requestSystem: systemForTokenizer,
     toolNameMap,
+    stopSequences: (requestData.stop_sequences as string[] | null | undefined) ?? null,
     audit,
   };
 
@@ -355,6 +368,9 @@ anthropicRoutes.post("/v1/messages", async (c) => {
           } catch (e) {
             if (e instanceof FirstTokenTimeoutError && attempt < config.firstTokenMaxRetries - 1) {
               audit.upstreamRetry(attempt + 1, config.firstTokenMaxRetries);
+              // Cancel the timed-out upstream body before re-fetching so the
+              // stale connection is released instead of dangling until GC.
+              await response.body?.cancel().catch(() => {});
               const retry = await doFetch();
               audit.upstreamResponse(retry.status);
               if (retry.status !== 200) {
@@ -423,7 +439,16 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
   const auth = authenticate(c, true, config.proxyApiKey);
   await audit.auth(auth.token, auth.isPassthrough ? "passthrough" : "proxy");
 
-  const raw = await c.req.json();
+  let raw: unknown;
+  try {
+    raw = await c.req.json();
+  } catch {
+    audit.rejected(400, "invalid JSON body");
+    return c.json(
+      anthropicError("invalid_request_error", "Invalid JSON in request body."),
+      400,
+    );
+  }
   const parsed = anthropicCountTokensRequestSchema.safeParse(raw);
   if (!parsed.success) {
     audit.rejected(422, "schema validation failed");

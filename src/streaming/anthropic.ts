@@ -17,6 +17,11 @@ import {
 import { countTokens, estimateRequestTokens } from "../lib/tokenizer";
 import { callKiroMcpApi, generateSearchSummary } from "../lib/mcpTools";
 import { saveToolTruncation, saveContentTruncation } from "../lib/truncation";
+import {
+  normalizeStopSequences,
+  StopSequenceMatcher,
+  applyStopToText,
+} from "../lib/stopSequences";
 import type { AuditLogger } from "../lib/auditLog";
 
 /** Anthropic SSE event line: `event: <type>\ndata: <json>\n\n`. */
@@ -64,6 +69,8 @@ export interface AnthropicStreamArgs {
   requestTools?: Record<string, any>[] | null;
   requestSystem?: unknown;
   toolNameMap?: Record<string, string>;
+  /** Anthropic `stop_sequences` — honored by truncating output at the first match. */
+  stopSequences?: string[] | null;
   audit?: AuditLogger;
 }
 
@@ -110,19 +117,35 @@ export async function* streamKiroToAnthropic(
   let upstreamCacheUsage: Record<string, number> = {};
   const truncatedTools: Array<{ id: string; name: string; info: Record<string, any> }> = [];
 
-  yield formatSseEvent("message_start", {
-    type: "message_start",
-    message: {
-      id: messageId,
-      type: "message",
-      role: "assistant",
-      content: [],
-      model,
-      stop_reason: null,
-      stop_sequence: null,
-      usage: { input_tokens: inputTokens, output_tokens: 0 },
-    },
-  });
+  // Stop-sequence handling (Anthropic stop_sequences). Truncate streamed text at
+  // the first match; the matcher holds back any cross-chunk partial prefix.
+  const stopMatcher = new StopSequenceMatcher(normalizeStopSequences(args.stopSequences));
+  let stopTriggered = false;
+  let matchedStopSequence: string | null = null;
+
+  // message_start is emitted LAZILY, only after the first upstream event is
+  // successfully read — never before. The first-token-timeout retry wrapper
+  // (route level) re-invokes this generator from scratch when the very first
+  // read times out; if we emitted message_start eagerly here, every retry would
+  // produce a second message_start and violate the Anthropic SSE contract
+  // (exactly one message_start per response). Gating it on the first event means
+  // a timed-out attempt emits nothing, so the successful attempt is the only one
+  // that opens the message.
+  let messageStartEmitted = false;
+  const messageStartEvent = () =>
+    formatSseEvent("message_start", {
+      type: "message_start",
+      message: {
+        id: messageId,
+        type: "message",
+        role: "assistant",
+        content: [],
+        model,
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: inputTokens, output_tokens: 0 },
+      },
+    });
 
   for await (const event of parseKiroStream(
     body,
@@ -132,11 +155,17 @@ export async function* streamKiroToAnthropic(
     args.toolNameMap,
     args.audit,
   )) {
+    if (!messageStartEmitted) {
+      messageStartEmitted = true;
+      yield messageStartEvent();
+    }
     if (event.type === "content") {
-      const content = event.content ?? "";
-      fullContent += content;
+      const raw = event.content ?? "";
+      // Route through the stop matcher: emit only the provably-safe prefix.
+      const r = stopMatcher.push(raw);
+      const content = r.emit;
 
-      if (thinkingBlockStarted && thinkingBlockIndex !== null) {
+      if (content && thinkingBlockStarted && thinkingBlockIndex !== null) {
         yield formatSseEvent("content_block_stop", {
           type: "content_block_stop",
           index: thinkingBlockIndex,
@@ -144,21 +173,27 @@ export async function* streamKiroToAnthropic(
         thinkingBlockStarted = false;
         currentBlockIndex += 1;
       }
-      if (!textBlockStarted) {
-        textBlockIndex = currentBlockIndex;
-        yield formatSseEvent("content_block_start", {
-          type: "content_block_start",
-          index: textBlockIndex,
-          content_block: { type: "text", text: "" },
-        });
-        textBlockStarted = true;
-      }
       if (content) {
+        fullContent += content;
+        if (!textBlockStarted) {
+          textBlockIndex = currentBlockIndex;
+          yield formatSseEvent("content_block_start", {
+            type: "content_block_start",
+            index: textBlockIndex,
+            content_block: { type: "text", text: "" },
+          });
+          textBlockStarted = true;
+        }
         yield formatSseEvent("content_block_delta", {
           type: "content_block_delta",
           index: textBlockIndex,
           delta: { type: "text_delta", text: content },
         });
+      }
+      if (r.stopped) {
+        stopTriggered = true;
+        matchedStopSequence = r.matched;
+        break;
       }
     } else if (event.type === "thinking") {
       const thinking = event.thinkingContent ?? "";
@@ -260,6 +295,10 @@ export async function* streamKiroToAnthropic(
             content_block: { type: "text", text: "" },
           });
           const summary = generateSearchSummary(query, results);
+          // Count the streamed summary toward output tokens, matching the
+          // OpenAI streaming path and the Anthropic collect path (which both
+          // include it). Without this, outputTokens undercounts.
+          fullContent += summary;
           for (let i = 0; i < summary.length; i += 100) {
             yield formatSseEvent("content_block_delta", {
               type: "content_block_delta",
@@ -303,6 +342,44 @@ export async function* streamKiroToAnthropic(
     }
   }
 
+  // Empty upstream stream (no events at all): message_start was never emitted,
+  // but the contract still requires it before message_delta/message_stop. Flush
+  // it now so the response is well-formed. (This path is reached only when the
+  // first read succeeds with an immediate end-of-stream, not on a timeout — a
+  // timeout throws and is retried before reaching here.)
+  if (!messageStartEmitted) {
+    messageStartEmitted = true;
+    yield messageStartEvent();
+  }
+
+  // Stream ended without a stop match: release any held-back tail into the text
+  // block (opening one if no content was emitted yet).
+  if (!stopTriggered) {
+    const tail = stopMatcher.flush();
+    if (tail) {
+      fullContent += tail;
+      if (thinkingBlockStarted && thinkingBlockIndex !== null) {
+        yield formatSseEvent("content_block_stop", { type: "content_block_stop", index: thinkingBlockIndex });
+        thinkingBlockStarted = false;
+        currentBlockIndex += 1;
+      }
+      if (!textBlockStarted) {
+        textBlockIndex = currentBlockIndex;
+        yield formatSseEvent("content_block_start", {
+          type: "content_block_start",
+          index: textBlockIndex,
+          content_block: { type: "text", text: "" },
+        });
+        textBlockStarted = true;
+      }
+      yield formatSseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: textBlockIndex,
+        delta: { type: "text_delta", text: tail },
+      });
+    }
+  }
+
   // Close any blocks still open.
   if (thinkingBlockStarted && thinkingBlockIndex !== null) {
     yield formatSseEvent("content_block_stop", { type: "content_block_stop", index: thinkingBlockIndex });
@@ -314,7 +391,10 @@ export async function* streamKiroToAnthropic(
 
   const streamCompletedNormally = contextUsagePercentage !== null;
   const contentWasTruncated =
-    !streamCompletedNormally && fullContent.length > 0 && toolBlocks.length === 0;
+    !stopTriggered &&
+    !streamCompletedNormally &&
+    fullContent.length > 0 &&
+    toolBlocks.length === 0;
 
   let outputTokens = countTokens(fullContent + fullThinking);
   if (contextUsagePercentage !== null) {
@@ -327,15 +407,19 @@ export async function* streamKiroToAnthropic(
     if (promptSource !== "unknown") inputTokens = promptTokens;
   }
 
-  const stopReason = contentWasTruncated
-    ? "max_tokens"
-    : toolBlocks.length
-      ? "tool_use"
-      : "end_turn";
+  // stop_reason: a matched stop sequence wins; report it (+ stop_sequence)
+  // exactly as the Anthropic API does.
+  const stopReason = stopTriggered
+    ? "stop_sequence"
+    : contentWasTruncated
+      ? "max_tokens"
+      : toolBlocks.length
+        ? "tool_use"
+        : "end_turn";
 
   yield formatSseEvent("message_delta", {
     type: "message_delta",
-    delta: { stop_reason: stopReason, stop_sequence: null },
+    delta: { stop_reason: stopReason, stop_sequence: stopTriggered ? matchedStopSequence : null },
     usage: { output_tokens: outputTokens, ...upstreamCacheUsage },
   });
   yield formatSseEvent("message_stop", { type: "message_stop" });
@@ -384,7 +468,15 @@ export async function collectAnthropicResponse(
       signature: generateThinkingSignature(),
     });
   }
-  let textContent = result.content;
+
+  // Apply stop_sequences to the generated content (mirrors the streaming path:
+  // matched against content text, truncated before the sequence).
+  const stopSeqs = normalizeStopSequences(args.stopSequences);
+  const stopApplied = applyStopToText(result.content, stopSeqs);
+  const stoppedBySequence = stopApplied.stopped;
+  const effectiveContent = stopApplied.text;
+
+  let textContent = effectiveContent;
   if (result.thinkingContent && (config.fakeReasoningHandling as string) === "include_as_text") {
     textContent = result.thinkingContent + textContent;
   }
@@ -393,10 +485,11 @@ export async function collectAnthropicResponse(
   // Tool calls: intercept web_search (Path B) so the non-streaming path returns
   // executed search results instead of an unresolved tool_use block — mirrors
   // the streaming adapter. Only real (non-web_search) tool calls drive
-  // stop_reason: tool_use.
+  // stop_reason: tool_use. Skipped entirely when a stop sequence fired — output
+  // ended deliberately mid-content.
   let realToolUseCount = 0;
   let webSearchOutput = "";
-  for (const tc of result.toolCalls) {
+  for (const tc of stoppedBySequence ? [] : result.toolCalls) {
     const toolName = tc.function.name;
     let input: Record<string, any> = {};
     try {
@@ -430,7 +523,7 @@ export async function collectAnthropicResponse(
     realToolUseCount += 1;
   }
 
-  let outputTokens = countTokens(result.content + result.thinkingContent + webSearchOutput);
+  let outputTokens = countTokens(effectiveContent + result.thinkingContent + webSearchOutput);
   if (result.contextUsagePercentage !== null) {
     const [promptTokens, , promptSource] = calculateTokensFromContextUsage(
       result.contextUsagePercentage,
@@ -443,13 +536,18 @@ export async function collectAnthropicResponse(
 
   const streamCompletedNormally = result.contextUsagePercentage !== null;
   const contentWasTruncated =
-    !streamCompletedNormally && result.content.length > 0 && result.toolCalls.length === 0;
+    !stoppedBySequence &&
+    !streamCompletedNormally &&
+    result.content.length > 0 &&
+    result.toolCalls.length === 0;
 
-  const stopReason = contentWasTruncated
-    ? "max_tokens"
-    : realToolUseCount > 0
-      ? "tool_use"
-      : "end_turn";
+  const stopReason = stoppedBySequence
+    ? "stop_sequence"
+    : contentWasTruncated
+      ? "max_tokens"
+      : realToolUseCount > 0
+        ? "tool_use"
+        : "end_turn";
 
   if (config.truncationRecovery) {
     for (const tc of result.toolCalls) {
@@ -467,7 +565,7 @@ export async function collectAnthropicResponse(
     content: contentBlocks,
     model,
     stop_reason: stopReason,
-    stop_sequence: null,
+    stop_sequence: stoppedBySequence ? stopApplied.matched : null,
     usage: { input_tokens: inputTokens, output_tokens: outputTokens, ...upstreamCacheUsage },
   };
 }

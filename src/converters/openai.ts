@@ -14,6 +14,7 @@ import type {
   UnifiedImage,
 } from "../types";
 import { getModelIdForKiro } from "../lib/modelResolver";
+import { logWarn } from "../lib/log";
 import {
   extractTextContent,
   extractImagesFromContent,
@@ -140,7 +141,17 @@ export function convertOpenAIToolsToUnified(
 
   const unified: UnifiedTool[] = [];
   for (const tool of tools) {
-    if (tool.type !== "function") continue;
+    if (tool.type !== "function") {
+      // Silently dropping a caller-supplied tool is a correctness gap: the
+      // tokenizer still counts it and the client expects it to be available.
+      // We can't translate non-function tools into Kiro's tool format, but we
+      // log the drop so it's observable rather than invisible.
+      logWarn("tool.dropped.nonfunction", {
+        type: typeof tool.type === "string" ? tool.type : String(tool.type),
+        name: (tool as any).name ?? (tool as any).function?.name ?? null,
+      });
+      continue;
+    }
     if (tool.function) {
       unified.push({
         name: tool.function.name,
@@ -189,6 +200,37 @@ export function extractThinkingConfigFromOpenAI(
   };
 }
 
+/**
+ * Build a best-effort system-prompt instruction for OpenAI `response_format`.
+ * Kiro has no constrained/JSON decoding, so we steer the model with text. This
+ * is not a guarantee — it mirrors how OpenAI's own json_object mode behaves when
+ * the model is merely asked (vs. grammar-constrained). Returns "" for text mode
+ * or when no response_format is set.
+ */
+export function buildResponseFormatInstruction(
+  responseFormat: ChatCompletionRequest["response_format"],
+): string {
+  if (!responseFormat) return "";
+  const type = (responseFormat as any).type;
+  if (type === "json_object") {
+    return (
+      "\n\nYou must respond with a single valid JSON object and nothing else. " +
+      "Do not wrap it in markdown code fences or add any prose before or after."
+    );
+  }
+  if (type === "json_schema") {
+    const schema = (responseFormat as any).json_schema;
+    const schemaText = schema ? `\n\nJSON schema:\n${JSON.stringify(schema)}` : "";
+    return (
+      "\n\nYou must respond with a single valid JSON object that conforms to the " +
+      "provided JSON schema, and nothing else. Do not wrap it in markdown code " +
+      "fences or add any prose before or after." +
+      schemaText
+    );
+  }
+  return "";
+}
+
 /** Build the Kiro payload from an OpenAI request. */
 export async function buildOpenAIKiroPayload(
   requestData: ChatCompletionRequest,
@@ -203,9 +245,15 @@ export async function buildOpenAIKiroPayload(
   const modelId = getModelIdForKiro(requestData.model, HIDDEN_MODELS);
   const thinkingConfig = extractThinkingConfigFromOpenAI(requestData);
 
+  // Best-effort structured-output steering via the system prompt.
+  const rfInstruction = buildResponseFormatInstruction(requestData.response_format);
+  const effectiveSystemPrompt = rfInstruction
+    ? systemPrompt + rfInstruction
+    : systemPrompt;
+
   return buildKiroPayload({
     messages: unifiedMessages,
-    systemPrompt,
+    systemPrompt: effectiveSystemPrompt,
     modelId,
     tools: unifiedTools,
     conversationId,
