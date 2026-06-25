@@ -183,10 +183,18 @@ export class AwsEventStreamParser {
   private currentToolCall: ParsedToolCall | null = null;
   private toolCalls: ParsedToolCall[] = [];
   private readonly toolNameMap: Record<string, string>;
+  private readonly dedupConsecutive: boolean;
   private readonly decoder = new TextDecoder("utf-8");
 
-  constructor(toolNameMap?: Record<string, string>) {
+  /**
+   * @param toolNameMap        {alias: original} map to restore shortened names.
+   * @param dedupConsecutive   Drop consecutive-duplicate content events (default
+   *   true, matching the upstream parser). Set false to preserve legitimately
+   *   repeated tokens at the cost of forwarding Kiro's occasional double-emits.
+   */
+  constructor(toolNameMap?: Record<string, string>, dedupConsecutive = true) {
     this.toolNameMap = toolNameMap ?? {};
+    this.dedupConsecutive = dedupConsecutive;
   }
 
   /** Feed a raw byte chunk; returns any complete content/usage events. */
@@ -275,11 +283,12 @@ export class AwsEventStreamParser {
   private processContent(data: Record<string, unknown>): ParsedEvent | null {
     if (data["followupPrompt"]) return null;
     const content = (data["content"] as string) ?? "";
-    if (content === this.lastContent) {
+    if (this.dedupConsecutive && content === this.lastContent) {
       // Consecutive-duplicate dedup (faithful port of the Python parser). This
       // can drop a LEGITIMATE repeated token (e.g. the model emits "ha" twice).
       // We keep the behavior to match upstream double-emission quirks but log
       // non-empty drops so the (rare) data loss is observable rather than silent.
+      // Disable via STREAM_DEDUP_CONSECUTIVE=false to forward every content event.
       if (content) logWarn("stream.content.deduped", { length: content.length });
       return null;
     }

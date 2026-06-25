@@ -99,6 +99,12 @@ export interface Env {
   FAKE_REASONING_INITIAL_BUFFER_SIZE?: string;
   TRUNCATION_RECOVERY?: string;
   WEB_SEARCH_ENABLED?: string;
+  /**
+   * Drop consecutive-duplicate content events from the Kiro stream (default
+   * true, matching the upstream parser). Set false to preserve legitimately
+   * repeated tokens at the cost of forwarding Kiro's occasional double-emits.
+   */
+  STREAM_DEDUP_CONSECUTIVE?: string;
   /** Inbound HTTP body cap (bytes), enforced from Content-Length in index.ts. */
   KIRO_MAX_REQUEST_BYTES?: string;
   KIRO_MAX_PAYLOAD_BYTES?: string;
@@ -128,6 +134,7 @@ export interface Config {
   fakeReasoningInitialBufferSize: number;
   truncationRecovery: boolean;
   webSearchEnabled: boolean;
+  dedupConsecutiveContent: boolean;
   maxPayloadBytes: number;
   autoTrimPayload: boolean;
   toolDescriptionMaxLength: number;
@@ -217,6 +224,7 @@ export function loadConfig(env: Env): Config {
     ),
     truncationRecovery: truthy(env.TRUNCATION_RECOVERY, true),
     webSearchEnabled: truthy(env.WEB_SEARCH_ENABLED, true),
+    dedupConsecutiveContent: truthy(env.STREAM_DEDUP_CONSECUTIVE, true),
     // Clamp to positive: a zero/negative payload cap would fail every request.
     maxPayloadBytes: numMin(env.KIRO_MAX_PAYLOAD_BYTES, 600000, 1),
     autoTrimPayload: truthy(env.AUTO_TRIM_PAYLOAD, false),

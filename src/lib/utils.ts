@@ -86,3 +86,36 @@ export function generateConversationId(): string {
 export function generateToolCallId(): string {
   return `call_${uuidHex().slice(0, 8)}`;
 }
+
+/**
+ * Split a string into chunks of at most `size` Unicode code points.
+ *
+ * A naive `str.slice(i, i + size)` cuts on UTF-16 code-unit boundaries, which
+ * can split a surrogate pair (emoji, many CJK extension chars, etc.) in half —
+ * the two halves then decode to U+FFFD replacement characters on the wire,
+ * corrupting the text. Iterating with the string iterator yields whole code
+ * points, so chunk boundaries never fall inside a surrogate pair.
+ *
+ * Note: this preserves code points, not grapheme clusters — a chunk boundary
+ * can still fall between a base character and a combining mark. That is
+ * cosmetically harmless (it re-composes when concatenated client-side) and
+ * avoids pulling in Intl.Segmenter; the goal here is only to stop producing
+ * invalid UTF-16/UTF-8.
+ */
+export function chunkByCodePoints(text: string, size: number): string[] {
+  if (size <= 0) return text ? [text] : [];
+  const chunks: string[] = [];
+  let current = "";
+  let count = 0;
+  for (const cp of text) {
+    current += cp;
+    count += 1;
+    if (count >= size) {
+      chunks.push(current);
+      current = "";
+      count = 0;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}

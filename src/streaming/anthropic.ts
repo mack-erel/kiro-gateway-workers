@@ -16,6 +16,7 @@ import {
 } from "./core";
 import { countTokens, estimateRequestTokens } from "../lib/tokenizer";
 import { callKiroMcpApi, generateSearchSummary } from "../lib/mcpTools";
+import { chunkByCodePoints } from "../lib/utils";
 import { saveToolTruncation, saveContentTruncation } from "../lib/truncation";
 import {
   normalizeStopSequences,
@@ -94,11 +95,16 @@ export async function* streamKiroToAnthropic(
 
   let inputTokens = 0;
   if (args.requestMessages || args.requestTools || args.requestSystem) {
+    // Apply the Claude correction so this local input-token estimate matches
+    // both the /v1/messages/count_tokens endpoint (which corrects) and the
+    // output-token count below (countTokens corrects by default). This fallback
+    // is only used when Kiro returns no context-usage signal; otherwise
+    // inputTokens is replaced by the API-derived prompt count further down.
     inputTokens = estimateRequestTokens(
       args.requestMessages ?? [],
       args.requestTools,
       args.requestSystem,
-      false,
+      true,
     ).totalTokens;
   }
 
@@ -299,11 +305,11 @@ export async function* streamKiroToAnthropic(
           // OpenAI streaming path and the Anthropic collect path (which both
           // include it). Without this, outputTokens undercounts.
           fullContent += summary;
-          for (let i = 0; i < summary.length; i += 100) {
+          for (const part of chunkByCodePoints(summary, 100)) {
             yield formatSseEvent("content_block_delta", {
               type: "content_block_delta",
               index: currentBlockIndex,
-              delta: { type: "text_delta", text: summary.slice(i, i + 100) },
+              delta: { type: "text_delta", text: part },
             });
           }
           yield formatSseEvent("content_block_stop", { type: "content_block_stop", index: currentBlockIndex });
@@ -442,11 +448,16 @@ export async function collectAnthropicResponse(
 
   let inputTokens = 0;
   if (args.requestMessages || args.requestTools || args.requestSystem) {
+    // Apply the Claude correction so this local input-token estimate matches
+    // both the /v1/messages/count_tokens endpoint (which corrects) and the
+    // output-token count below (countTokens corrects by default). This fallback
+    // is only used when Kiro returns no context-usage signal; otherwise
+    // inputTokens is replaced by the API-derived prompt count further down.
     inputTokens = estimateRequestTokens(
       args.requestMessages ?? [],
       args.requestTools,
       args.requestSystem,
-      false,
+      true,
     ).totalTokens;
   }
 

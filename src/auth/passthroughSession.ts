@@ -19,6 +19,7 @@
 import type { KiroAuthContext } from "../types";
 import { sha256Hex } from "../lib/utils";
 import { createKiroAuthContext } from "./kiroAuth";
+import { ModelInfoCache } from "../lib/cache";
 import { FALLBACK_MODELS, getKiroManagementHost } from "../config";
 
 /** Cached, request-independent state derived from a client API key. */
@@ -29,6 +30,14 @@ export interface PassthroughSession {
    * fallback if discovery failed). Plain data, so it is Workers-safe to cache.
    */
   modelsData: Array<Record<string, any>>;
+  /**
+   * Model-info cache built once from {@link modelsData}. Holds only plain,
+   * request-independent metadata (token limits, model ids) and is read-only on
+   * the request path (no per-request mutation — addHiddenModel is unused and
+   * HIDDEN_MODELS is empty), so it is Workers-safe to share across requests
+   * instead of rebuilding it on every call.
+   */
+  modelCache: ModelInfoCache;
 }
 
 /**
@@ -102,6 +111,7 @@ async function fetchModelsViaManagement(
 export async function getPassthroughSession(
   apiKey: string,
   region: string,
+  modelCacheTtlMs: number,
 ): Promise<PassthroughSession> {
   const hash = await sessionKeyHash(apiKey);
 
@@ -129,7 +139,13 @@ export async function getPassthroughSession(
     modelsData = FALLBACK_MODELS;
   }
 
-  const session: PassthroughSession = { authContext, modelsData };
+  // Build the model-info cache once, here, rather than on every request. The
+  // session TTL bounds its freshness (an expired session re-discovers the model
+  // list and rebuilds this cache).
+  const modelCache = new ModelInfoCache(modelCacheTtlMs);
+  modelCache.update(modelsData);
+
+  const session: PassthroughSession = { authContext, modelsData, modelCache };
 
   // Evict the oldest-inserted entry once the cap is reached. Map preserves
   // insertion order, so the first key is the oldest. A re-inserted (refreshed)

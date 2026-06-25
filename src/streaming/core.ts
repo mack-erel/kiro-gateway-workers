@@ -130,7 +130,7 @@ async function* parseKiroStreamRaw(
   enableThinkingParser = true,
   toolNameMap?: Record<string, string>,
 ): AsyncGenerator<KiroEvent, void, unknown> {
-  const parser = new AwsEventStreamParser(toolNameMap);
+  const parser = new AwsEventStreamParser(toolNameMap, config.dedupConsecutiveContent);
 
   let thinkingParser: ThinkingParser | null = null;
   if (config.fakeReasoningEnabled && enableThinkingParser) {

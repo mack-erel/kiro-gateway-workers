@@ -128,11 +128,9 @@ openaiRoutes.get("/v1/models", async (c) => {
   if (auth.isPassthrough) {
     // Resolve the discovered list through ModelResolver so aliases are shown
     // (e.g. auto-kiro) and HIDDEN_FROM_LIST entries (e.g. auto) are hidden.
-    const session = await getPassthroughSession(auth.token, config.apiRegion);
-    const modelCache = new ModelInfoCache(config.modelCacheTtlMs);
-    modelCache.update(session.modelsData);
+    const session = await getPassthroughSession(auth.token, config.apiRegion, config.modelCacheTtlMs);
     const resolver = new ModelResolver(
-      modelCache,
+      session.modelCache,
       HIDDEN_MODELS,
       MODEL_ALIASES,
       HIDDEN_FROM_LIST,
@@ -266,10 +264,9 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
     requestData.tools = tools as typeof requestData.tools;
   }
 
-  const session = await getPassthroughSession(auth.token, config.apiRegion);
+  const session = await getPassthroughSession(auth.token, config.apiRegion, config.modelCacheTtlMs);
   const authContext = session.authContext;
-  const modelCache = new ModelInfoCache(config.modelCacheTtlMs);
-  modelCache.update(session.modelsData);
+  const modelCache = session.modelCache;
 
   const conversationId = generateConversationId();
   let payload: Record<string, any>;

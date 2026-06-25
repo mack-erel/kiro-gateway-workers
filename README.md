@@ -129,8 +129,10 @@ Tunables live in `wrangler.jsonc` under `vars` and are read via `loadConfig`
 | `FAKE_REASONING_HANDLING` | `as_reasoning_content` | Thinking output mode |
 | `TRUNCATION_RECOVERY` | `true` | Synthetic recovery messages |
 | `WEB_SEARCH_ENABLED` | `true` | Auto-inject web_search tool |
+| `STREAM_DEDUP_CONSECUTIVE` | `true` | Drop consecutive identical content events in the stream parser |
 | `KIRO_MAX_PAYLOAD_BYTES` | `600000` | Payload-size guard |
 | `AUTO_TRIM_PAYLOAD` | `false` | Trim oldest history over the limit |
+| `MODEL_CACHE_TTL` | `3600` (s) | Per-session model-list cache TTL (`0` disables) |
 | `DEBUG_STREAM_EVENTS` | `false` | Audit-log each KiroEvent (Level 2) |
 | `DEBUG_BODIES` | `false` | Audit-log request / payload / response bodies (Level 3) |
 | `PROXY_API_KEY` | _(unset)_ | Optional non-ksk_ gate (secret) |
@@ -185,6 +187,14 @@ test/                 vitest unit tests
   history-hash variant is unused here).
 - The session model-list cache is best-effort per isolate; KV is the
   cross-isolate cache.
+- **Sampling parameters** (`temperature`, `top_p`, `top_k`, `presence_penalty`,
+  …) are accepted but **silently ignored** — Kiro's `generateAssistantResponse`
+  payload has no slot for them. They are not rejected, since that would break
+  most clients. (`n > 1` and `logprobs`, by contrast, are rejected.)
+- **`tool_choice`** is honored on a **best-effort** basis: Kiro has no native
+  field for it, so `required`/`any`/a named tool / `none` are translated into a
+  system-prompt instruction (same mechanism as `response_format`) rather than a
+  hard upstream constraint.
 
 ## License
 

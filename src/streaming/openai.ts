@@ -16,7 +16,7 @@ import {
   deduplicateToolCalls,
   type ParsedToolCall,
 } from "../parsers/eventStream";
-import { generateCompletionId } from "../lib/utils";
+import { generateCompletionId, chunkByCodePoints } from "../lib/utils";
 import {
   countTokens,
   countMessageTokens,
@@ -136,8 +136,8 @@ export async function* streamKiroToOpenAI(
           const { results } = await callKiroMcpApi(query, auth);
           if (results !== null) {
             const summary = generateSearchSummary(query, results);
-            for (let i = 0; i < summary.length; i += 100) {
-              yield chunk({ content: summary.slice(i, i + 100) });
+            for (const part of chunkByCodePoints(summary, 100)) {
+              yield chunk({ content: part });
             }
             fullContent += summary;
             continue;
@@ -200,8 +200,11 @@ export async function* streamKiroToOpenAI(
     model,
   );
   if (promptSource === "unknown" && args.requestMessages) {
-    promptTokens = countMessageTokens(args.requestMessages, false);
-    if (args.requestTools) promptTokens += countToolsTokens(args.requestTools, false);
+    // Apply the Claude correction so this fallback prompt estimate matches the
+    // corrected completion count above (countTokens corrects by default). Used
+    // only when Kiro returns no context-usage signal.
+    promptTokens = countMessageTokens(args.requestMessages, true);
+    if (args.requestTools) promptTokens += countToolsTokens(args.requestTools, true);
     totalTokens = promptTokens + completionTokens;
   }
 

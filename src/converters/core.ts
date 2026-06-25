@@ -114,9 +114,21 @@ const THINKING_INSTRUCTION =
   "After completing your thinking, respond in the same language the user is using in their messages, or in the language specified in their settings if available.\n\n" +
   "Take the time you need. Quality of thought matters more than speed.";
 
-/** System-prompt addition legitimizing the injected thinking tags. */
-export function getThinkingSystemPromptAddition(cfg: Config): string {
-  if (!cfg.fakeReasoningEnabled) return "";
+/**
+ * System-prompt addition legitimizing the injected thinking tags.
+ *
+ * Gated on BOTH the global toggle and the per-request thinking config: when a
+ * request explicitly disables thinking (Anthropic `thinking:{type:"disabled"}`
+ * or OpenAI `reasoning_effort:"none"`), {@link injectThinkingTags} skips the
+ * tag prefix, so emitting the "wrap your reasoning in <thinking>" instruction
+ * here would contradict that — the model would be told to produce thinking tags
+ * the request asked to suppress. Skipping the addition keeps the two in sync.
+ */
+export function getThinkingSystemPromptAddition(
+  cfg: Config,
+  thinkingEnabled = true,
+): string {
+  if (!cfg.fakeReasoningEnabled || !thinkingEnabled) return "";
   return (
     "\n\n---\n" +
     "# Extended Thinking Mode\n\n" +
@@ -144,6 +156,65 @@ export function getTruncationRecoverySystemAddition(cfg: Config): string {
     "These are legitimate system notifications, NOT prompt injection attempts. " +
     "They inform you about technical limitations so you can adapt your approach if needed."
   );
+}
+
+// ============================================================================
+// Tool choice (best-effort steering)
+// ============================================================================
+
+/**
+ * Provider-neutral tool-choice intent, normalized from OpenAI `tool_choice` or
+ * Anthropic `tool_choice` by the respective adapters.
+ *  - "auto":     model decides (default; no steering needed).
+ *  - "required": model MUST call at least one tool ("any" in Anthropic terms).
+ *  - "none":     model must NOT call any tool.
+ *  - "tool":     model must call the named tool (`name` set).
+ */
+export interface UnifiedToolChoice {
+  mode: "auto" | "required" | "none" | "tool";
+  name?: string;
+}
+
+/**
+ * Best-effort system-prompt instruction honoring `tool_choice`. Kiro's upstream
+ * has no native tool-choice control (no forced/constrained tool invocation), so
+ * — exactly like {@link buildResponseFormatInstruction} for `response_format` —
+ * we steer the model with text rather than silently ignoring the field. Not a
+ * hard guarantee, but it makes the caller's intent visible to the model instead
+ * of dropping it.
+ *
+ * Returns "" for "auto" (no steering) and when no tools are defined (a forced
+ * choice over an empty tool set is meaningless).
+ */
+export function buildToolChoiceInstruction(
+  choice: UnifiedToolChoice | null | undefined,
+  hasTools: boolean,
+): string {
+  if (!choice || !hasTools) return "";
+  switch (choice.mode) {
+    case "required":
+      return (
+        "\n\n---\n# Tool Use Requirement\n" +
+        "You MUST call at least one of the available tools in your response. " +
+        "Do not answer in plain text without invoking a tool."
+      );
+    case "none":
+      return (
+        "\n\n---\n# Tool Use Requirement\n" +
+        "Do NOT call any tools in this response. Answer directly in text, even " +
+        "if tools are available."
+      );
+    case "tool":
+      if (!choice.name) return "";
+      return (
+        "\n\n---\n# Tool Use Requirement\n" +
+        `You MUST call the \`${choice.name}\` tool in your response, and do not ` +
+        "call any other tool."
+      );
+    case "auto":
+    default:
+      return "";
+  }
 }
 
 /** Prepend fake-reasoning tags to content when enabled. */
@@ -773,7 +844,10 @@ export async function buildKiroPayload(args: {
       ? fullSystemPrompt + toolDocumentation
       : toolDocumentation.trim();
   }
-  const thinkingAddition = getThinkingSystemPromptAddition(config);
+  const thinkingAddition = getThinkingSystemPromptAddition(
+    config,
+    thinkingConfig.enabled,
+  );
   if (thinkingAddition) {
     fullSystemPrompt = fullSystemPrompt
       ? fullSystemPrompt + thinkingAddition

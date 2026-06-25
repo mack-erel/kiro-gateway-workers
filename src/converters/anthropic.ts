@@ -18,6 +18,8 @@ import {
   extractTextContent,
   extractImagesFromContent,
   buildKiroPayload,
+  buildToolChoiceInstruction,
+  type UnifiedToolChoice,
   type KiroPayloadResult,
 } from "./core";
 import type { AnthropicMessagesRequest } from "../models/anthropic";
@@ -174,6 +176,27 @@ export function extractThinkingConfigFromAnthropic(
   return { enabled: true, budgetTokens: null };
 }
 
+/**
+ * Normalize Anthropic `tool_choice` into the provider-neutral form. Anthropic
+ * accepts `{type:"auto"}`, `{type:"any"}` (must use some tool), `{type:"tool",
+ * name}` (must use the named tool), or `{type:"none"}` (must not). Anything
+ * unrecognized maps to "auto" (no steering).
+ */
+export function normalizeAnthropicToolChoice(
+  toolChoice: unknown,
+): UnifiedToolChoice | null {
+  if (toolChoice == null || typeof toolChoice !== "object") return null;
+  const type = (toolChoice as any).type;
+  if (type === "any") return { mode: "required" };
+  if (type === "none") return { mode: "none" };
+  if (type === "tool") {
+    const name = (toolChoice as any).name;
+    if (typeof name === "string" && name) return { mode: "tool", name };
+    return { mode: "required" };
+  }
+  return { mode: "auto" };
+}
+
 /** Build the Kiro payload from an Anthropic request. */
 export async function anthropicToKiro(
   request: AnthropicMessagesRequest,
@@ -187,9 +210,16 @@ export async function anthropicToKiro(
   const modelId = getModelIdForKiro(request.model, HIDDEN_MODELS);
   const thinkingConfig = extractThinkingConfigFromAnthropic(request);
 
+  // Best-effort tool_choice steering (Kiro has no native forced-tool control).
+  const tcInstruction = buildToolChoiceInstruction(
+    normalizeAnthropicToolChoice(request.tool_choice),
+    !!(unifiedTools && unifiedTools.length),
+  );
+  const effectiveSystemPrompt = systemPrompt + tcInstruction;
+
   return buildKiroPayload({
     messages: unifiedMessages,
-    systemPrompt,
+    systemPrompt: effectiveSystemPrompt,
     modelId,
     tools: unifiedTools,
     conversationId,

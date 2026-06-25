@@ -15,7 +15,6 @@ import {
 import { anthropicToKiro } from "../converters/anthropic";
 import { buildToolNameReverseMap } from "../converters/core";
 import { generateConversationId } from "../lib/utils";
-import { ModelInfoCache } from "../lib/cache";
 import { estimateRequestTokens } from "../lib/tokenizer";
 import { requestWithRetry } from "../lib/httpClient";
 import { FirstTokenTimeoutError } from "../streaming/core";
@@ -281,10 +280,9 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     requestData.tools = tools as typeof requestData.tools;
   }
 
-  const session = await getPassthroughSession(auth.token, config.apiRegion);
+  const session = await getPassthroughSession(auth.token, config.apiRegion, config.modelCacheTtlMs);
   const authContext = session.authContext;
-  const modelCache = new ModelInfoCache(config.modelCacheTtlMs);
-  modelCache.update(session.modelsData);
+  const modelCache = session.modelCache;
 
   // Path A early return: direct MCP call, bypassing generateAssistantResponse.
   if (isNativeWebSearch) {

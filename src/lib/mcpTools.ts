@@ -9,7 +9,7 @@
  * Workers adaptations: global fetch instead of httpx, crypto-based random IDs.
  */
 import type { KiroAuthContext } from "../types";
-import { getKiroHeaders, generateCompletionId } from "./utils";
+import { getKiroHeaders, generateCompletionId, chunkByCodePoints } from "./utils";
 import { countTokens, countMessageTokens } from "./tokenizer";
 import { logError } from "./log";
 
@@ -223,11 +223,11 @@ export function* generateAnthropicWebSearchSse(
     index: 2,
     content_block: { type: "text", text: "" },
   });
-  for (let i = 0; i < summary.length; i += 100) {
+  for (const part of chunkByCodePoints(summary, 100)) {
     yield formatSseEvent("content_block_delta", {
       type: "content_block_delta",
       index: 2,
-      delta: { type: "text_delta", text: summary.slice(i, i + 100) },
+      delta: { type: "text_delta", text: part },
     });
   }
   yield formatSseEvent("content_block_stop", { type: "content_block_stop", index: 2 });
@@ -266,8 +266,8 @@ export function* generateOpenAiWebSearchSse(
   };
 
   yield chunk({ role: "assistant" }, null);
-  for (let i = 0; i < summary.length; i += 100) {
-    yield chunk({ content: summary.slice(i, i + 100) }, null);
+  for (const part of chunkByCodePoints(summary, 100)) {
+    yield chunk({ content: part }, null);
   }
   yield chunk({}, "stop", {
     prompt_tokens: inputTokens,

@@ -129,8 +129,10 @@ claude mcp add --transport http --scope user kiro-credits \
 | `FAKE_REASONING_HANDLING` | `as_reasoning_content` | thinking 출력 모드 |
 | `TRUNCATION_RECOVERY` | `true` | 합성 복구 메시지 |
 | `WEB_SEARCH_ENABLED` | `true` | web_search 툴 자동 주입 |
+| `STREAM_DEDUP_CONSECUTIVE` | `true` | 스트림 파서에서 연속 중복 content 이벤트 제거 |
 | `KIRO_MAX_PAYLOAD_BYTES` | `600000` | 페이로드 크기 가드 |
 | `AUTO_TRIM_PAYLOAD` | `false` | 한도 초과 시 오래된 히스토리 트리밍 |
+| `MODEL_CACHE_TTL` | `3600` (초) | 세션별 모델 목록 캐시 TTL (`0`이면 비활성) |
 | `DEBUG_STREAM_EVENTS` | `false` | KiroEvent별 감사 로그 (Level 2) |
 | `DEBUG_BODIES` | `false` | 요청/페이로드/응답 본문 감사 로그 (Level 3) |
 | `PROXY_API_KEY` | _(미설정)_ | 선택적 비-ksk_ 게이트 (secret) |
@@ -184,6 +186,13 @@ test/                 vitest 단위 테스트
 - passthrough 경로의 `conversation_id`는 랜덤 UUID입니다(원본의 히스토리 해시
   방식은 여기서 사용하지 않음).
 - 세션 모델 목록 캐시는 isolate별 best-effort입니다.
+- **샘플링 파라미터**(`temperature`, `top_p`, `top_k`, `presence_penalty` 등)는
+  받아들이되 **조용히 무시**됩니다 — Kiro의 `generateAssistantResponse`
+  페이로드에 해당 슬롯이 없기 때문입니다. 거부하면 대부분의 클라이언트가
+  깨지므로 거부하지 않습니다. (반면 `n > 1`과 `logprobs`는 거부합니다.)
+- **`tool_choice`**는 **best-effort**로 처리됩니다: Kiro에 네이티브 필드가
+  없으므로 `required`/`any`/특정 툴 지정/`none`은 상류 강제 제약이 아니라
+  시스템 프롬프트 지시로 변환됩니다(`response_format`과 동일한 방식).
 
 ## 라이선스
 

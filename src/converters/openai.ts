@@ -19,6 +19,8 @@ import {
   extractTextContent,
   extractImagesFromContent,
   buildKiroPayload,
+  buildToolChoiceInstruction,
+  type UnifiedToolChoice,
   type KiroPayloadResult,
 } from "./core";
 import type { ChatMessage, ChatCompletionRequest, Tool } from "../models/openai";
@@ -231,6 +233,28 @@ export function buildResponseFormatInstruction(
   return "";
 }
 
+/**
+ * Normalize OpenAI `tool_choice` into the provider-neutral form. OpenAI accepts
+ * the strings "none" | "auto" | "required", or an object
+ * `{type:"function", function:{name}}` forcing a specific tool. Anything
+ * unrecognized maps to "auto" (no steering).
+ */
+export function normalizeOpenAIToolChoice(
+  toolChoice: unknown,
+): UnifiedToolChoice | null {
+  if (toolChoice == null) return null;
+  if (typeof toolChoice === "string") {
+    if (toolChoice === "none") return { mode: "none" };
+    if (toolChoice === "required") return { mode: "required" };
+    return { mode: "auto" };
+  }
+  if (typeof toolChoice === "object") {
+    const name = (toolChoice as any).function?.name ?? (toolChoice as any).name;
+    if (typeof name === "string" && name) return { mode: "tool", name };
+  }
+  return { mode: "auto" };
+}
+
 /** Build the Kiro payload from an OpenAI request. */
 export async function buildOpenAIKiroPayload(
   requestData: ChatCompletionRequest,
@@ -247,9 +271,12 @@ export async function buildOpenAIKiroPayload(
 
   // Best-effort structured-output steering via the system prompt.
   const rfInstruction = buildResponseFormatInstruction(requestData.response_format);
-  const effectiveSystemPrompt = rfInstruction
-    ? systemPrompt + rfInstruction
-    : systemPrompt;
+  // Best-effort tool_choice steering (Kiro has no native forced-tool control).
+  const tcInstruction = buildToolChoiceInstruction(
+    normalizeOpenAIToolChoice(requestData.tool_choice),
+    !!(unifiedTools && unifiedTools.length),
+  );
+  const effectiveSystemPrompt = systemPrompt + rfInstruction + tcInstruction;
 
   return buildKiroPayload({
     messages: unifiedMessages,
