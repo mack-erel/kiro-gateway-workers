@@ -31,9 +31,10 @@ const CREDITS_TOOL = {
   title: "Get Kiro Credits",
   description:
     "Get the caller's remaining Kiro credits and usage limits for the current " +
-    "billing period. Returns used / limit / remaining credits, the subscription " +
-    "plan, and the next reset date. Authenticated with the caller's own Kiro API " +
-    "key supplied in the request Authorization header.",
+    "billing period. Returns used / limit / remaining credits, whether overage " +
+    "(spending beyond the plan allotment) is enabled, the subscription plan, and " +
+    "the next reset date. Authenticated with the caller's own Kiro API key " +
+    "supplied in the request Authorization header.",
   inputSchema: {
     type: "object",
     properties: {},
@@ -48,6 +49,19 @@ const CREDITS_TOOL = {
         type: ["string", "null"],
         description: "ISO-8601 date when usage resets.",
       },
+      overageEnabled: {
+        type: ["boolean", "null"],
+        description:
+          "Whether spending beyond the plan allotment is allowed (overageStatus === ENABLED).",
+      },
+      overageStatus: {
+        type: ["string", "null"],
+        description: "Raw overage status, e.g. \"ENABLED\" / \"DISABLED\".",
+      },
+      overageCapability: {
+        type: ["string", "null"],
+        description: "Account overage capability, e.g. \"OVERAGE_CAPABLE\".",
+      },
       breakdown: {
         type: "array",
         items: {
@@ -60,6 +74,26 @@ const CREDITS_TOOL = {
             remaining: { type: "number" },
             usedFraction: { type: ["number", "null"] },
             unit: { type: ["string", "null"] },
+            currentOverages: {
+              type: "number",
+              description: "Overage consumed beyond the allotment this period.",
+            },
+            overageCap: {
+              type: ["number", "null"],
+              description: "Max overage permitted beyond the allotment.",
+            },
+            overageRate: {
+              type: ["number", "null"],
+              description: "Per-unit overage price.",
+            },
+            overageCharges: {
+              type: "number",
+              description: "Money charged for overage so far this period.",
+            },
+            currency: {
+              type: ["string", "null"],
+              description: "ISO-4217 currency for overage charges/rate.",
+            },
           },
         },
       },
@@ -110,6 +144,9 @@ function toStructured(u: UsageLimits) {
     plan: u.plan,
     planType: u.planType,
     nextResetDate: u.nextResetDate,
+    overageEnabled: u.overageEnabled,
+    overageStatus: u.overageStatus,
+    overageCapability: u.overageCapability,
     breakdown: u.breakdown,
   };
 }

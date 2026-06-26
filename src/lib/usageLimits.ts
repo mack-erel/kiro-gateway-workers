@@ -28,6 +28,16 @@ export interface UsageBreakdownEntry {
   usedFraction: number | null;
   /** Unit of measure, e.g. "INVOCATIONS". */
   unit: string | null;
+  /** Overage consumed beyond the allotment so far this period (fractional). */
+  currentOverages: number;
+  /** Max overage permitted beyond the allotment, or null if not provided. */
+  overageCap: number | null;
+  /** Per-unit overage price, or null if not provided. */
+  overageRate: number | null;
+  /** Money charged for overage so far this period. */
+  overageCharges: number;
+  /** ISO-4217 currency for overage charges/rate, e.g. "USD". */
+  currency: string | null;
 }
 
 /** Normalized result of a usage-limits lookup. */
@@ -38,6 +48,16 @@ export interface UsageLimits {
   planType: string | null;
   /** ISO-8601 date when usage resets, or null if not provided. */
   nextResetDate: string | null;
+  /**
+   * Whether spending beyond the plan allotment is allowed.
+   * `true` when `overageConfiguration.overageStatus === "ENABLED"`,
+   * `false` for an explicit disabled status, `null` when not provided.
+   */
+  overageEnabled: boolean | null;
+  /** Raw overage status string, e.g. "ENABLED" / "DISABLED". */
+  overageStatus: string | null;
+  /** Account-level overage capability, e.g. "OVERAGE_CAPABLE". */
+  overageCapability: string | null;
   /** Per-resource breakdown (usually a single "Credit" entry). */
   breakdown: UsageBreakdownEntry[];
   /** Raw upstream payload, for callers that want everything. */
@@ -124,34 +144,63 @@ export function normalizeUsageLimits(data: Record<string, any>): UsageLimits {
       remaining,
       usedFraction: limit > 0 ? used / limit : null,
       unit: (e["unit"] as string) ?? null,
+      currentOverages:
+        numOrNull(e["currentOveragesWithPrecision"]) ?? numOrNull(e["currentOverages"]) ?? 0,
+      overageCap:
+        numOrNull(e["overageCapWithPrecision"]) ?? numOrNull(e["overageCap"]),
+      overageRate: numOrNull(e["overageRate"]),
+      overageCharges: numOrNull(e["overageCharges"]) ?? 0,
+      currency: (e["currency"] as string) ?? null,
     };
   });
+
+  const overageCfg = (data["overageConfiguration"] as Record<string, any>) ?? {};
+  const overageStatus = (overageCfg["overageStatus"] as string) ?? null;
 
   return {
     plan: (sub["subscriptionTitle"] as string) ?? null,
     planType: (sub["type"] as string) ?? null,
     nextResetDate: epochSecondsToIso(data["nextDateReset"]),
+    overageEnabled:
+      overageStatus === null ? null : overageStatus.toUpperCase() === "ENABLED",
+    overageStatus,
+    overageCapability: (sub["overageCapability"] as string) ?? null,
     breakdown,
     raw: data,
   };
 }
 
 /** Render a one-line-per-resource human summary, e.g.
- *  "Credit: 6357.93 / 10000 used (3642.07 remaining, 63.6%) · plan KIRO POWER · resets 2026-07-01". */
+ *  "Credit: 6357.93 / 10000 used (3642.07 remaining, 63.6%) · overage ENABLED · plan KIRO POWER · resets 2026-07-01". */
 export function formatUsageSummary(u: UsageLimits): string {
   if (u.breakdown.length === 0) {
     return `No usage breakdown returned${u.plan ? ` (plan ${u.plan})` : ""}.`;
   }
   const reset = u.nextResetDate ? u.nextResetDate.slice(0, 10) : null;
+  const round = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(2));
   const lines = u.breakdown.map((b) => {
     const pct = b.usedFraction !== null ? `, ${(b.usedFraction * 100).toFixed(1)}%` : "";
-    const round = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(2));
-    return (
+    let line =
       `${b.resourceName}: ${round(b.used)} / ${round(b.limit)} used` +
-      ` (${round(b.remaining)} remaining${pct})`
-    );
+      ` (${round(b.remaining)} remaining${pct})`;
+    if (b.currentOverages > 0) {
+      const cap = b.overageCap !== null ? ` / ${round(b.overageCap)}` : "";
+      const charges =
+        b.overageCharges > 0
+          ? `, ${b.currency ?? ""}${round(b.overageCharges)}`.trimEnd()
+          : "";
+      line += ` · overage ${round(b.currentOverages)}${cap}${charges}`;
+    }
+    return line;
   });
+  const overageLabel =
+    u.overageStatus !== null
+      ? `overage ${u.overageStatus}`
+      : u.overageEnabled !== null
+        ? `overage ${u.overageEnabled ? "ENABLED" : "DISABLED"}`
+        : null;
   const suffix = [
+    overageLabel,
     u.plan ? `plan ${u.plan}` : null,
     reset ? `resets ${reset}` : null,
   ]

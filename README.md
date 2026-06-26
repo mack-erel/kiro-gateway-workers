@@ -112,7 +112,10 @@ claude mcp add --transport http --scope user kiro-credits \
 
 The response carries both a human-readable text summary (`content`) and machine
 structured JSON (`structuredContent`: `plan`, `planType`, `nextResetDate`,
-`breakdown[]`).
+`overageEnabled` / `overageStatus` / `overageCapability`, and `breakdown[]` —
+each entry including `currentOverages`, `overageCap`, `overageRate`,
+`overageCharges`, and `currency`). `overageEnabled` reflects whether the account
+is allowed to spend beyond its plan allotment (`overageStatus === "ENABLED"`).
 
 ## Configuration
 

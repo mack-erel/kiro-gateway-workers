@@ -111,8 +111,11 @@ claude mcp add --transport http --scope user kiro-credits \
 ```
 
 응답에는 사람이 읽는 텍스트 요약(`content`)과 기계용 구조화 JSON
-(`structuredContent`: `plan`, `planType`, `nextResetDate`, `breakdown[]`)이 함께
-담깁니다.
+(`structuredContent`: `plan`, `planType`, `nextResetDate`,
+`overageEnabled` / `overageStatus` / `overageCapability`, 그리고 `breakdown[]`
+— 각 항목에 `currentOverages`, `overageCap`, `overageRate`, `overageCharges`,
+`currency` 포함)이 함께 담깁니다. `overageEnabled`는 플랜 할당량을 초과해
+사용(과금)하는 것이 허용되는지를 나타냅니다(`overageStatus === "ENABLED"`).
 
 ## 환경 설정
 
