@@ -9,7 +9,7 @@
  */
 import { Hono } from "hono";
 import type { Env } from "../config";
-import { loadConfig, FALLBACK_MODELS, HIDDEN_MODELS, MODEL_ALIASES, HIDDEN_FROM_LIST } from "../config";
+import { loadConfig } from "../config";
 import { authenticate } from "../auth/middleware";
 import { getPassthroughSession } from "../auth/passthroughSession";
 import {
@@ -19,8 +19,7 @@ import {
 import { buildOpenAIKiroPayload } from "../converters/openai";
 import { buildToolNameReverseMap } from "../converters/core";
 import { generateConversationId } from "../lib/utils";
-import { ModelInfoCache } from "../lib/cache";
-import { ModelResolver } from "../lib/modelResolver";
+import { resolveAvailableModelIds, toOpenAiModelList } from "../lib/modelList";
 import { requestWithRetry } from "../lib/httpClient";
 import { FirstTokenTimeoutError } from "../streaming/core";
 import { streamKiroToOpenAI, collectOpenAIResponse } from "../streaming/openai";
@@ -124,42 +123,15 @@ openaiRoutes.get("/v1/models", async (c) => {
   const config = loadConfig(c.env);
   const auth = authenticate(c, false, config.proxyApiKey);
 
-  let modelIds: string[];
-  if (auth.isPassthrough) {
-    // Resolve the discovered list through ModelResolver so aliases are shown
-    // (e.g. auto-kiro) and HIDDEN_FROM_LIST entries (e.g. auto) are hidden.
-    const session = await getPassthroughSession(auth.token, config.apiRegion, config.modelCacheTtlMs);
-    const resolver = new ModelResolver(
-      session.modelCache,
-      HIDDEN_MODELS,
-      MODEL_ALIASES,
-      HIDDEN_FROM_LIST,
-    );
-    modelIds = resolver.getAvailableModels();
-  } else {
-    // Proxy mode: advertise the static fallback list, still respecting the
-    // alias/hidden policy for a consistent catalog.
-    const modelCache = new ModelInfoCache(config.modelCacheTtlMs);
-    modelCache.update(FALLBACK_MODELS);
-    const resolver = new ModelResolver(
-      modelCache,
-      HIDDEN_MODELS,
-      MODEL_ALIASES,
-      HIDDEN_FROM_LIST,
-    );
-    modelIds = resolver.getAvailableModels();
-  }
+  // In passthrough mode the discovered list is resolved per key; otherwise
+  // (proxy mode) resolveAvailableModelIds falls back to the static catalog.
+  // Both paths apply the same alias/hidden policy (e.g. show auto-kiro, hide auto).
+  const modelIds = await resolveAvailableModelIds(
+    auth.isPassthrough ? auth.token : null,
+    config,
+  );
 
-  return c.json({
-    object: "list",
-    data: modelIds.map((id) => ({
-      id,
-      object: "model",
-      created: Math.floor(Date.now() / 1000),
-      owned_by: "anthropic",
-      description: "Claude model via Kiro API",
-    })),
-  });
+  return c.json(toOpenAiModelList(modelIds));
 });
 
 // POST /v1/embeddings — explicitly unsupported. The Kiro backend has no

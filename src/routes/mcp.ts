@@ -12,11 +12,17 @@
  */
 import { Hono } from "hono";
 import type { Env } from "../config";
+import { loadConfig } from "../config";
 import {
   fetchUsageLimits,
   formatUsageSummary,
   type UsageLimits,
 } from "../lib/usageLimits";
+import {
+  resolveAvailableModelIds,
+  toOpenAiModelList,
+  toAnthropicModelList,
+} from "../lib/modelList";
 
 export const mcpRoutes = new Hono<{ Bindings: Env }>();
 
@@ -101,6 +107,46 @@ const CREDITS_TOOL = {
   },
 } as const;
 
+const MODEL_FORMATS = ["openai", "anthropic", "both"] as const;
+type ModelFormat = (typeof MODEL_FORMATS)[number];
+
+const MODELS_TOOL = {
+  name: "list_kiro_models",
+  title: "List Kiro Models",
+  description:
+    "List the models available to the caller, discovered live from the Kiro " +
+    "management endpoint, rendered in each agent's native shape. The `format` " +
+    "argument selects the output: \"openai\" (OpenAI /v1/models shape), " +
+    "\"anthropic\" (Anthropic /v1/models shape), or \"both\" (default). " +
+    "Authenticated with the caller's own Kiro API key supplied in the request " +
+    "Authorization header.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      format: {
+        type: "string",
+        enum: MODEL_FORMATS,
+        description:
+          "Output shape: \"openai\", \"anthropic\", or \"both\" (default).",
+      },
+    },
+    additionalProperties: false,
+  },
+  outputSchema: {
+    type: "object",
+    properties: {
+      openai: {
+        type: ["object", "null"],
+        description: "OpenAI /v1/models list (present when format is openai/both).",
+      },
+      anthropic: {
+        type: ["object", "null"],
+        description: "Anthropic /v1/models list (present when format is anthropic/both).",
+      },
+    },
+  },
+} as const;
+
 // ---------------------------------------------------------------------------
 // JSON-RPC helpers
 // ---------------------------------------------------------------------------
@@ -169,28 +215,82 @@ function handleInitialize(req: JsonRpcRequest) {
 }
 
 function handleToolsList(req: JsonRpcRequest) {
-  return rpcResult(req.id, { tools: [CREDITS_TOOL] });
+  return rpcResult(req.id, { tools: [CREDITS_TOOL, MODELS_TOOL] });
+}
+
+/** Missing/invalid ksk_ key, surfaced as a tool error (isError) for the model. */
+function missingKeyResult(req: JsonRpcRequest) {
+  return rpcResult(req.id, {
+    content: [
+      {
+        type: "text",
+        text:
+          "Missing or invalid Kiro API key. Supply your ksk_ key via the " +
+          "Authorization: Bearer header (or x-api-key).",
+      },
+    ],
+    isError: true,
+  });
+}
+
+/** Build a compact human-readable summary of the model IDs. */
+function formatModelSummary(ids: string[]): string {
+  if (ids.length === 0) return "No models available.";
+  const lines = ids.map((id) => `- ${id}`).join("\n");
+  return `${ids.length} model(s) available:\n${lines}`;
+}
+
+async function handleListModels(req: JsonRpcRequest, env: Env, apiKey: string | null) {
+  if (!apiKey || !apiKey.startsWith("ksk_")) {
+    return missingKeyResult(req);
+  }
+
+  const requested = req.params?.arguments?.format as string | undefined;
+  const format: ModelFormat = MODEL_FORMATS.includes(requested as ModelFormat)
+    ? (requested as ModelFormat)
+    : "both";
+
+  const config = loadConfig(env);
+  try {
+    const ids = await resolveAvailableModelIds(apiKey, config);
+    const structured: Record<string, unknown> = {};
+    if (format === "openai" || format === "both") {
+      structured.openai = toOpenAiModelList(ids);
+    }
+    if (format === "anthropic" || format === "both") {
+      structured.anthropic = toAnthropicModelList(ids);
+    }
+    return rpcResult(req.id, {
+      content: [{ type: "text", text: formatModelSummary(ids) }],
+      structuredContent: structured,
+    });
+  } catch (e) {
+    return rpcResult(req.id, {
+      content: [
+        {
+          type: "text",
+          text: `Failed to list Kiro models: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        },
+      ],
+      isError: true,
+    });
+  }
 }
 
 async function handleToolsCall(req: JsonRpcRequest, env: Env, apiKey: string | null) {
   const name = req.params?.name as string | undefined;
+  if (name === MODELS_TOOL.name) {
+    return handleListModels(req, env, apiKey);
+  }
   if (name !== CREDITS_TOOL.name) {
     return rpcError(req.id, -32602, `Unknown tool: ${name ?? "(none)"}`);
   }
   if (!apiKey || !apiKey.startsWith("ksk_")) {
     // Surface auth failure as a tool error (isError) so MCP clients show it to
     // the model/user, rather than a transport-level RPC error.
-    return rpcResult(req.id, {
-      content: [
-        {
-          type: "text",
-          text:
-            "Missing or invalid Kiro API key. Supply your ksk_ key via the " +
-            "Authorization: Bearer header (or x-api-key).",
-        },
-      ],
-      isError: true,
-    });
+    return missingKeyResult(req);
   }
 
   const region = env.KIRO_API_REGION || env.KIRO_REGION || "us-east-1";

@@ -27,7 +27,7 @@ loading — those modes from the original gateway are intentionally omitted.
 | POST | `/v1/chat/completions` | OpenAI Chat Completions (stream + non-stream) |
 | POST | `/v1/messages` | Anthropic Messages (stream + non-stream) |
 | POST | `/v1/messages/count_tokens` | Local token estimate (no upstream call) |
-| POST | `/mcp` | MCP server — `get_kiro_credits` tool (remaining credits) |
+| POST | `/mcp` | MCP server — `get_kiro_credits` + `list_kiro_models` tools |
 
 All `/v1/*` endpoints require a `ksk_…` key. Without one, the gateway returns 401.
 
@@ -87,19 +87,33 @@ curl http://localhost:8787/v1/messages \
   -d '{"model":"claude-sonnet-4.5","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
-### MCP — remaining credits
+### MCP — credits & model list
 
-`POST /mcp` is a stateless MCP server (JSON-RPC 2.0) exposing a single read-only
-tool, `get_kiro_credits`. It authenticates with the caller's own `ksk_…` key via
-the request header and returns the current billing period's usage/limit/remaining
-credits, subscription plan, and next reset date.
+`POST /mcp` is a stateless MCP server (JSON-RPC 2.0) exposing two read-only
+tools. Both authenticate with the caller's own `ksk_…` key via the request
+header; no server-side credentials are stored.
+
+- **`get_kiro_credits`** — the current billing period's usage/limit/remaining
+  credits, subscription plan, and next reset date.
+- **`list_kiro_models`** — the models available to the caller (discovered live
+  from the Kiro management endpoint, same catalog as `GET /v1/models`), rendered
+  in each agent's native shape. Takes an optional `format` argument:
+  `"openai"` (OpenAI `/v1/models` shape), `"anthropic"` (Anthropic `/v1/models`
+  shape), or `"both"` (default). The `structuredContent` carries an `openai`
+  and/or `anthropic` key accordingly.
 
 ```bash
-# Direct call (for testing / scripting)
+# Remaining credits
 curl https://kiro-api.static.mov/mcp \
   -H "Authorization: Bearer ksk_your_key" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_kiro_credits","arguments":{}}}'
+
+# Model list (both formats)
+curl https://kiro-api.static.mov/mcp \
+  -H "Authorization: Bearer ksk_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_kiro_models","arguments":{"format":"both"}}}'
 ```
 
 Register with an MCP client (e.g. Claude Code):
