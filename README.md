@@ -23,7 +23,7 @@ loading — those modes from the original gateway are intentionally omitted.
 |--------|------|-------|
 | GET | `/` | Liveness probe |
 | GET | `/health` | Status + timestamp + version |
-| GET | `/v1/models` | OpenAI model list (`owned_by: "anthropic"`) |
+| GET | `/v1/models` | Model list — OpenAI shape by default, Anthropic shape when `anthropic-version` is sent |
 | POST | `/v1/chat/completions` | OpenAI Chat Completions (stream + non-stream) |
 | POST | `/v1/messages` | Anthropic Messages (stream + non-stream) |
 | POST | `/v1/messages/count_tokens` | Local token estimate (no upstream call) |
@@ -86,6 +86,49 @@ curl http://localhost:8787/v1/messages \
   -H "Content-Type: application/json" \
   -d '{"model":"claude-sonnet-4.5","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}'
 ```
+
+### Claude Code
+
+Point Claude Code at the gateway and let it discover the model list:
+
+```bash
+export ANTHROPIC_BASE_URL="https://your-worker.workers.dev"
+export ANTHROPIC_AUTH_TOKEN="ksk_your_key"
+export ANTHROPIC_API_KEY=""              # keep empty so it can't fall back to Anthropic auth
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC   # any value at all disables discovery
+```
+
+Every model then shows up in the `/model` picker under a "From gateway" label.
+Non-Claude models (`glm-5`, `qwen3-coder-next`, …) appear there as
+`anthropic-glm-5`: Claude Code's discovery **ignores any id that does not start
+with `claude` or `anthropic`**, so the Anthropic list shape advertises them
+under that prefix and the gateway strips it back off on the request path. Both
+spellings work — `anthropic-glm-5` and `glm-5` reach Kiro as the same model.
+The picker shows the clean display name ("Glm 5"), not the prefix.
+
+Discovery is best-effort and fails **silently** to a local cache. If the picker
+looks stale, check the endpoint directly — the `anthropic-version` header is
+what selects the shape:
+
+```bash
+curl https://your-worker.workers.dev/v1/models \
+  -H "Authorization: Bearer ksk_your_key" \
+  -H "anthropic-version: 2023-06-01"
+```
+
+Discovery also requires the base URL to serve this path with **no redirect**
+(credentials are not forwarded across one) within a 3s timeout — a cold start in
+passthrough mode has to reach Kiro's management endpoint, so the first call
+after a cache expiry can miss the window. It sends exactly one credential
+header: bearer when `ANTHROPIC_AUTH_TOKEN` is set, `x-api-key` otherwise
+(including `apiKeyHelper`); this endpoint accepts both. Note the asymmetry:
+`/v1/models` and `/v1/messages` take either header, but `/v1/chat/completions`
+is bearer-only — an OpenAI-ecosystem client authenticating via `x-api-key` will
+list models and then 401 on the first completion.
+
+Skipping discovery entirely also works — behind a gateway, Claude Code does no
+model-name validation, so `ANTHROPIC_MODEL="qwen3-coder-next"` is enough.
 
 ### MCP — credits & model list
 

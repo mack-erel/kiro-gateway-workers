@@ -39,6 +39,15 @@ export const MODEL_ALIASES: Record<string, string> = {
   "auto-kiro": "auto",
 };
 
+// Prefix under which non-Claude models are advertised in the Anthropic
+// /v1/models shape. Claude Code's gateway model discovery drops every entry
+// whose id does not start with "claude" or "anthropic", which would hide the
+// entire non-Claude half of Kiro's catalog (glm-5, qwen3-coder-next, …) from
+// the /model picker. The Anthropic list formatter adds this prefix and
+// ModelResolver strips it back off, so `anthropic-glm-5` and `glm-5` are the
+// same model. No Kiro model id starts with it, so the mapping is unambiguous.
+export const DISCOVERY_PREFIX = "anthropic-";
+
 // Models that work but are not advertised by Kiro's ListAvailableModels.
 // Format: display name → internal Kiro ID.
 export const HIDDEN_MODELS: Record<string, string> = {};

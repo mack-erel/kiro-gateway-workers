@@ -19,7 +19,11 @@ import {
 import { buildOpenAIKiroPayload } from "../converters/openai";
 import { buildToolNameReverseMap } from "../converters/core";
 import { generateConversationId } from "../lib/utils";
-import { resolveAvailableModelIds, toOpenAiModelList } from "../lib/modelList";
+import {
+  resolveAvailableModelIds,
+  toOpenAiModelList,
+  toAnthropicModelList,
+} from "../lib/modelList";
 import { requestWithRetry } from "../lib/httpClient";
 import { FirstTokenTimeoutError } from "../streaming/core";
 import { streamKiroToOpenAI, collectOpenAIResponse } from "../streaming/openai";
@@ -119,9 +123,21 @@ const WEB_SEARCH_TOOL = {
 };
 
 // GET /v1/models
+//
+// Serves both audiences off one path: OpenAI clients and Claude Code's gateway
+// model discovery. The response shape is negotiated on `anthropic-version` —
+// the header Claude Code already sends and OpenAI clients never do — because
+// Hono gives the path to whichever router registers it first, so a second
+// registration in anthropicRoutes would be dead code.
+//
+// `x-api-key` is accepted here (unlike the rest of the OpenAI surface): Claude
+// Code's discovery sends exactly one credential header — bearer when
+// ANTHROPIC_AUTH_TOKEN is set, x-api-key otherwise (including apiKeyHelper) —
+// so a bearer-only gate 401s those setups, and discovery swallows the error and
+// silently falls back to its cache.
 openaiRoutes.get("/v1/models", async (c) => {
   const config = loadConfig(c.env);
-  const auth = authenticate(c, false, config.proxyApiKey);
+  const auth = authenticate(c, true, config.proxyApiKey);
 
   // In passthrough mode the discovered list is resolved per key; otherwise
   // (proxy mode) resolveAvailableModelIds falls back to the static catalog.
@@ -131,6 +147,14 @@ openaiRoutes.get("/v1/models", async (c) => {
     config,
   );
 
+  // The body varies by request header, so say so: this stock deploy is not
+  // edge-cached, but the README points ANTHROPIC_BASE_URL here and any
+  // intermediary cache would otherwise serve one client the other's shape.
+  c.header("Vary", "anthropic-version");
+
+  if (c.req.header("anthropic-version")) {
+    return c.json(toAnthropicModelList(modelIds, { discoveryPrefix: true }));
+  }
   return c.json(toOpenAiModelList(modelIds));
 });
 

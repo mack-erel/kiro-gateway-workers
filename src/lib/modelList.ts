@@ -15,6 +15,7 @@ import {
   MODEL_ALIASES,
   HIDDEN_FROM_LIST,
   FALLBACK_MODELS,
+  DISCOVERY_PREFIX,
 } from "../config";
 import { getPassthroughSession } from "../auth/passthroughSession";
 import { ModelInfoCache } from "./cache";
@@ -114,12 +115,47 @@ export interface AnthropicModelList {
   last_id: string | null;
 }
 
-/** Format model IDs into the Anthropic `/v1/models` shape. */
-export function toAnthropicModelList(ids: string[]): AnthropicModelList {
+/**
+ * True when Claude Code's gateway model discovery keeps an id as-is. The picker
+ * ignores every entry whose id does not start with `claude` or `anthropic`.
+ */
+function isDiscoverable(id: string): boolean {
+  const lower = id.toLowerCase();
+  return lower.startsWith("claude") || lower.startsWith("anthropic");
+}
+
+export interface AnthropicModelListOptions {
+  /**
+   * Rename non-Claude ids to `anthropic-<id>` so Claude Code's gateway model
+   * discovery keeps them (it drops every id not starting with `claude`/
+   * `anthropic`). Only the HTTP `/v1/models` response is subject to that
+   * filter, so this is opt-in: callers with no filter — the MCP
+   * `list_kiro_models` tool — would otherwise report a name for the model that
+   * neither their own text summary nor the OpenAI shape agrees with.
+   * `ModelResolver` strips the prefix back off on the request path, so a
+   * prefixed id remains usable wherever it surfaces.
+   */
+  discoveryPrefix?: boolean;
+}
+
+/**
+ * Format model IDs into the Anthropic `/v1/models` shape.
+ *
+ * The display name is always derived from the raw id, so the prefix stays a
+ * wire detail and never reaches the picker as "Anthropic Glm 5".
+ *
+ * The OpenAI shape is never prefixed — its clients have no discovery filter,
+ * and renaming there would break every existing `glm-5` config.
+ */
+export function toAnthropicModelList(
+  ids: string[],
+  options: AnthropicModelListOptions = {},
+): AnthropicModelList {
   const createdAt = new Date(nowSeconds() * 1000).toISOString();
+  const prefix = options.discoveryPrefix ?? false;
   const data: AnthropicModelObject[] = ids.map((id) => ({
     type: "model" as const,
-    id,
+    id: prefix && !isDiscoverable(id) ? DISCOVERY_PREFIX + id : id,
     display_name: deriveDisplayName(id),
     created_at: createdAt,
   }));

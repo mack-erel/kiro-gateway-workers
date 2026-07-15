@@ -1,11 +1,12 @@
 /**
  * Dynamic model resolution. Faithful port of `kiro/model_resolver.py`.
  *
- * 4-layer pipeline: alias → normalize (dashes→dots, strip dates) → dynamic
- * cache → hidden models → pass-through. Principle: gateway, not gatekeeper —
- * resolve() never throws; unknown models pass through for Kiro to judge.
+ * 5-layer pipeline: discovery-prefix strip → alias → normalize (dashes→dots,
+ * strip dates) → dynamic cache → hidden models → pass-through. Principle:
+ * gateway, not gatekeeper — resolve() never throws; unknown models pass through
+ * for Kiro to judge.
  */
-import { FALLBACK_MODELS, MODEL_ALIASES } from "../config";
+import { DISCOVERY_PREFIX, FALLBACK_MODELS, MODEL_ALIASES } from "../config";
 import type { ModelInfoCache } from "./cache";
 
 /** Valid runtime model IDs (from FALLBACK_MODELS, single source of truth). */
@@ -87,10 +88,35 @@ export function getModelIdForKiro(
   hiddenModels: Record<string, string>,
   aliases: Record<string, string> = MODEL_ALIASES,
 ): string {
-  const aliased = aliases[modelName] ?? modelName;
+  const unprefixed = stripDiscoveryPrefix(modelName);
+  const aliased = aliases[unprefixed] ?? unprefixed;
   const normalized = normalizeModelName(aliased);
   const internal = hiddenModels[normalized] ?? normalized;
   return toRuntimeModelId(internal);
+}
+
+/**
+ * Strip the {@link DISCOVERY_PREFIX} the Anthropic `/v1/models` shape adds to
+ * non-Claude ids. Clients that picked a model out of that list send it back
+ * prefixed (`anthropic-glm-5`), so the prefix must come off before the alias
+ * layer or the raw string would reach Kiro, which does not know it.
+ *
+ * Case-insensitive, matching {@link normalizeModelName} and the list
+ * formatter's discoverability check — the three must agree on what the prefix
+ * is or a name can be advertised prefixed and arrive unstripped.
+ *
+ * Unconditional, which is safe only while no real Kiro id starts with
+ * `anthropic-`. That holds for FALLBACK_MODELS and for every id Kiro's
+ * ListAvailableModels returns today (Bedrock-style names use a dot —
+ * `anthropic.claude-v2` — and so do not match), but the live list is a
+ * third-party input: if Kiro ever ships an `anthropic-` id, it would resolve to
+ * the stripped name instead of itself. Callers holding a model cache should
+ * prefer a real match over un-prefixing.
+ */
+export function stripDiscoveryPrefix(name: string): string {
+  return name.toLowerCase().startsWith(DISCOVERY_PREFIX)
+    ? name.slice(DISCOVERY_PREFIX.length)
+    : name;
 }
 
 /** Extract Claude family ('haiku'|'sonnet'|'opus') or null. */
@@ -119,8 +145,16 @@ export class ModelResolver {
 
   /** Resolve an external model name to an internal Kiro ID (never throws). */
   resolve(externalModel: string): ModelResolution {
-    // Layer 0: alias.
-    const resolvedModel = this.aliases[externalModel] ?? externalModel;
+    // Layer 0a: discovery prefix (added by the Anthropic /v1/models shape).
+    // A real model of that exact name wins over un-prefixing, so a future Kiro
+    // id starting with `anthropic-` resolves to itself rather than to whatever
+    // stripping the prefix happens to spell.
+    const unprefixed = this.cache.isValidModel(externalModel)
+      ? externalModel
+      : stripDiscoveryPrefix(externalModel);
+
+    // Layer 0b: alias.
+    const resolvedModel = this.aliases[unprefixed] ?? unprefixed;
 
     // Layer 1: normalize.
     const normalized = normalizeModelName(resolvedModel);
