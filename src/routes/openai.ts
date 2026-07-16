@@ -275,8 +275,10 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
     ));
   } catch (e) {
     if (e instanceof PayloadTooLargeError) {
-      audit.rejected(413, "payload too large");
-      return c.json(openaiError(e.message, "invalid_request_error", 413), 413);
+      // 400 for the same reason as the Anthropic route: an oversize
+      // conversation is an invalid_request_error, not a transport-level 413.
+      audit.rejected(400, "payload too large");
+      return c.json(openaiError(e.message, "invalid_request_error", 400), 400);
     }
     audit.rejected(400, `payload build failed: ${String(e)}`);
     return c.json(

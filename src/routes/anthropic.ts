@@ -296,8 +296,11 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     ({ payload } = await anthropicToKiro(requestData, conversationId, "", config));
   } catch (e) {
     if (e instanceof PayloadTooLargeError) {
-      audit.rejected(413, "payload too large");
-      return c.json(anthropicError("invalid_request_error", e.message), 413);
+      // 400, not 413: the Anthropic API reports an oversize conversation as an
+      // invalid_request_error, and clients are built around that. 413 stays for
+      // the inbound body cap in index.ts, which is a transport-level limit.
+      audit.rejected(400, "payload too large");
+      return c.json(anthropicError("invalid_request_error", e.message), 400);
     }
     audit.rejected(400, `payload build failed: ${String(e)}`);
     return c.json(

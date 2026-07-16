@@ -22,15 +22,26 @@ export interface PayloadTrimStats {
  * Thrown when a payload exceeds the size limit and auto-trim is disabled.
  * Mirrors the Python behavior of surfacing a clear error instead of forwarding
  * an oversize request that Kiro rejects with a misleading 400.
+ *
+ * The wording is load-bearing. Claude Code classifies an API error by matching
+ * /\b(too long|too large|exceeds|token limit|prompt is too long)\b/ against the
+ * message; on a hit it labels the turn "request too large — /compact or trim"
+ * and points the user at recovery. The previous wording ("exceeding the ...
+ * limit") matched nothing — `exceeding` is not `exceeds` — so an oversize
+ * request surfaced as an unclassified API error with no route forward. Keep a
+ * literal "too large" in this string.
+ *
+ * Counts stay in bytes, which is what the limit actually is. Phrasing it as
+ * "prompt is too long: N tokens > M" would additionally unlock Claude Code's
+ * token-parsing recovery, but only by reporting byte counts as token counts.
  */
 export class PayloadTooLargeError extends Error {
   readonly actualBytes: number;
   readonly maxBytes: number;
   constructor(actualBytes: number, maxBytes: number) {
     super(
-      `Request payload is ${actualBytes} bytes, exceeding the ${maxBytes}-byte limit. ` +
-        `Reduce the conversation/context size, or enable AUTO_TRIM_PAYLOAD to trim ` +
-        `oldest history automatically.`,
+      `Request payload is too large: ${actualBytes} bytes > the ${maxBytes}-byte limit. ` +
+        `Run /compact to shrink the conversation, or send less in this message.`,
     );
     this.name = "PayloadTooLargeError";
     this.actualBytes = actualBytes;
@@ -202,6 +213,29 @@ function sliceTailBytes(text: string, maxBytes: number): string {
 }
 
 /**
+ * Smallest share of a chunk that snapping to a line boundary may keep. Below
+ * it the chunk is treated as one enormous line — minified JSON, a base64 blob,
+ * a font metric array — where the nearest newline is not a boundary worth
+ * losing most of the chunk for.
+ */
+const LINE_SNAP_FLOOR = 0.5;
+
+/** Drop a trailing partial line: half a log line is noise, and worse, reads as
+ *  a whole one. Left alone when the chunk has no usable line boundary. */
+function snapHeadToLineEnd(chunk: string): string {
+  const cut = chunk.lastIndexOf("\n");
+  return cut >= chunk.length * LINE_SNAP_FLOOR ? chunk.slice(0, cut) : chunk;
+}
+
+/** Drop a leading partial line, mirroring {@link snapHeadToLineEnd}. */
+function snapTailToLineStart(chunk: string): string {
+  const cut = chunk.indexOf("\n");
+  return cut >= 0 && cut <= chunk.length * (1 - LINE_SNAP_FLOOR)
+    ? chunk.slice(cut + 1)
+    : chunk;
+}
+
+/**
  * Shorten `text` to roughly `targetBytes` by removing its middle, keeping the
  * head and tail. A system prompt prefix is preserved verbatim and only the
  * remainder is shortened — the prompt is instructions, not content, and losing
@@ -232,8 +266,8 @@ function truncateMiddle(
   if (keep <= 0) return prefix + marker;
 
   const headBudget = Math.ceil(keep * HEAD_SHARE);
-  const head = sliceHeadBytes(body, headBudget);
-  const tail = sliceTailBytes(body, keep - headBudget);
+  const head = snapHeadToLineEnd(sliceHeadBytes(body, headBudget));
+  const tail = snapTailToLineStart(sliceTailBytes(body, keep - headBudget));
   return prefix + head + marker + tail;
 }
 
@@ -242,19 +276,30 @@ interface TextSlot {
   write(value: string): void;
 }
 
-/** Every shortenable text body in the payload: message contents and the text
- *  parts of tool results, across history and the current message. */
+/**
+ * Every shortenable text body in the payload.
+ *
+ * The current message's own `content` is deliberately excluded. It is what the
+ * caller just wrote or pasted, and quietly reshaping it to fit trades a clear
+ * "your input is too big" — which the caller can act on by sending less — for a
+ * confident answer drawn from a fraction of what they sent. Everything else is
+ * fair game: history is already accumulated (there is nothing to send less of,
+ * so rejecting it is a dead end), and tool results are machine output that
+ * Claude Code itself shortens.
+ */
 function collectTextSlots(payload: Json): TextSlot[] {
   const slots: TextSlot[] = [];
 
-  const addMessageSlots = (msg: Json | undefined): void => {
+  const addContentSlot = (msg: Json | undefined): void => {
+    if (!msg || typeof msg["content"] !== "string") return;
+    slots.push({
+      read: () => msg["content"],
+      write: (v) => { msg["content"] = v; },
+    });
+  };
+
+  const addToolResultSlots = (msg: Json | undefined): void => {
     if (!msg) return;
-    if (typeof msg["content"] === "string") {
-      slots.push({
-        read: () => msg["content"],
-        write: (v) => { msg["content"] = v; },
-      });
-    }
     for (const tr of msg["userInputMessageContext"]?.["toolResults"] ?? []) {
       const content = tr["content"];
       if (!Array.isArray(content)) continue;
@@ -270,10 +315,13 @@ function collectTextSlots(payload: Json): TextSlot[] {
   };
 
   for (const entry of payload["conversationState"]?.["history"] ?? []) {
-    addMessageSlots(entry["userInputMessage"]);
-    addMessageSlots(entry["assistantResponseMessage"]);
+    addContentSlot(entry["userInputMessage"]);
+    addToolResultSlots(entry["userInputMessage"]);
+    addContentSlot(entry["assistantResponseMessage"]);
   }
-  addMessageSlots(payload["conversationState"]?.["currentMessage"]?.["userInputMessage"]);
+
+  const current = payload["conversationState"]?.["currentMessage"]?.["userInputMessage"];
+  addToolResultSlots(current);
 
   return slots;
 }
@@ -282,9 +330,11 @@ function collectTextSlots(payload: Json): TextSlot[] {
  * Last-resort guard: shorten oversized message bodies so the payload fits.
  *
  * History trimming cannot save a request whose bulk sits somewhere it may not
- * touch — the current message (which is never trimmed) or the two history
- * entries it always keeps. A single pasted log or query dump lands exactly
- * there, which is why an oversize request could fail even with auto-trim on.
+ * touch — a tool result on the current message, or the two history entries the
+ * trim floor always keeps. That is why an oversize request could still fail
+ * with auto-trim on, taking /compact (which resends the conversation) with it.
+ *
+ * See {@link collectTextSlots} for what is off limits and why.
  *
  * Biggest body first: by this point history is already down to its floor, so
  * the remaining bulk is concentrated in one or two bodies, and going largest
