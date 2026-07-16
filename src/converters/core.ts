@@ -984,7 +984,18 @@ export async function buildKiroPayload(args: {
           droppedEntries: stats.originalEntries - stats.finalEntries,
         });
       }
-      // A single message can still exceed the limit after trimming history.
+      // Dropping history cannot reach the current message or the two entries it
+      // always keeps, so oversized bodies there get shortened middle-out.
+      if (stats.truncatedSlots > 0) {
+        logWarn("payload.truncated", {
+          originalBytes: stats.originalBytes,
+          finalBytes: stats.finalBytes,
+          truncatedSlots: stats.truncatedSlots,
+          truncatedBytes: stats.truncatedBytes,
+        });
+      }
+      // Still over: the untouchable remainder (system prompt plus each body's
+      // retained head and tail) exceeds the limit on its own.
       const after = checkPayloadSize(payload);
       if (after > config.maxPayloadBytes) {
         throw new PayloadTooLargeError(after, config.maxPayloadBytes);
