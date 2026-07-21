@@ -56,6 +56,60 @@ export function checkPayloadSize(payload: Json): number {
   return new TextEncoder().encode(JSON.stringify(payload)).length;
 }
 
+export interface PayloadSizePolicy {
+  maxPayloadBytes: number;
+  kiroHardLimitBytes: number;
+  autoTrimPayload: boolean;
+}
+
+/** What to do with a freshly built payload before the first upstream attempt. */
+export type PreflightAction = "forward" | "trim" | "reject";
+
+/**
+ * Decide how to treat a payload's size before contacting Kiro.
+ *
+ * Trimming loses history and tool-result detail, so we avoid it whenever Kiro
+ * would have accepted the payload untouched. Under our cap, or in the band
+ * between the cap and Kiro's real ~615KB ceiling, the payload is forwarded
+ * as-is and Kiro is left to judge it — if it rejects for size, the caller
+ * shrinks and retries then (see {@link classifyKiroRejection}). Only above
+ * Kiro's ceiling is a raw attempt certain to fail, so there we shrink up front
+ * when auto-trim is on, or reject cleanly when it is off.
+ */
+export function preflightPayloadAction(
+  payloadBytes: number,
+  policy: PayloadSizePolicy,
+): PreflightAction {
+  if (payloadBytes <= policy.maxPayloadBytes) return "forward";
+  if (payloadBytes <= policy.kiroHardLimitBytes) return "forward";
+  return policy.autoTrimPayload ? "trim" : "reject";
+}
+
+/** What to do after Kiro returns a non-200 for a payload we may be able to shrink. */
+export type KiroRejectionAction = "retry-after-trim" | "reject-too-large" | "passthrough";
+
+/**
+ * Classify a Kiro error as a recoverable size rejection or something else.
+ *
+ * Only Kiro's generic "Improperly formed request." (`malformedRequest`) on a
+ * payload still over our cap counts as size-related: our cap sits below Kiro's
+ * ceiling, so a payload under the cap is never rejected for size and such an
+ * error is a genuine upstream problem to surface. When it is size-related and
+ * not already trimmed, auto-trim decides whether to shrink and retry or to
+ * return a clean "too large" rejection.
+ */
+export function classifyKiroRejection(
+  info: { malformedRequest: boolean },
+  currentBytes: number,
+  alreadyTrimmed: boolean,
+  policy: { maxPayloadBytes: number; autoTrimPayload: boolean },
+): KiroRejectionAction {
+  if (alreadyTrimmed || !info.malformedRequest || currentBytes <= policy.maxPayloadBytes) {
+    return "passthrough";
+  }
+  return policy.autoTrimPayload ? "retry-after-trim" : "reject-too-large";
+}
+
 /** Remove empty `toolUses: []` arrays in-place (Kiro quirk). */
 function stripEmptyToolUses(history: Json[]): void {
   for (const entry of history) {

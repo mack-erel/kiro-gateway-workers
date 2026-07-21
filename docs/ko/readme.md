@@ -148,7 +148,8 @@ claude mcp add --transport http --scope user kiro-credits \
 | `WEB_SEARCH_ENABLED` | `true` | web_search 툴 자동 주입 |
 | `STREAM_DEDUP_CONSECUTIVE` | `true` | 스트림 파서에서 연속 중복 content 이벤트 제거 |
 | `KIRO_MAX_PAYLOAD_BYTES` | `600000` | 페이로드 크기 가드 |
-| `AUTO_TRIM_PAYLOAD` | `false` | 한도 초과 시 오래된 히스토리 트리밍 |
+| `KIRO_HARD_LIMIT_BYTES` | `615000` | Kiro 실제 한계; 여기까지는 트리밍 없이 그대로 전송 |
+| `AUTO_TRIM_PAYLOAD` | `true` | Kiro가 크기로 거부하면 히스토리/툴 결과 축소 후 재시도 (off = clean 거절) |
 | `MODEL_CACHE_TTL` | `3600` (초) | 세션별 모델 목록 캐시 TTL (`0`이면 비활성) |
 | `DEBUG_STREAM_EVENTS` | `false` | KiroEvent별 감사 로그 (Level 2) |
 | `DEBUG_BODIES` | `false` | 요청/페이로드/응답 본문 감사 로그 (Level 3) |

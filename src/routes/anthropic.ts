@@ -39,7 +39,13 @@ import {
 } from "../lib/mcpTools";
 import { countTokens } from "../lib/tokenizer";
 import { enhanceKiroErrorText } from "../lib/errors";
-import { PayloadTooLargeError } from "../lib/payloadGuards";
+import {
+  PayloadTooLargeError,
+  checkPayloadSize,
+  preflightPayloadAction,
+  classifyKiroRejection,
+  type PayloadTrimStats,
+} from "../lib/payloadGuards";
 import { AuditLogger } from "../lib/auditLog";
 
 export const anthropicRoutes = new Hono<{ Bindings: Env }>();
@@ -292,8 +298,24 @@ anthropicRoutes.post("/v1/messages", async (c) => {
 
   const conversationId = generateConversationId();
   let payload: Record<string, any>;
+  let trimToFit: () => PayloadTrimStats | null = () => null;
+  let didTrim = false;
   try {
-    ({ payload } = await anthropicToKiro(requestData, conversationId, "", config));
+    let payloadBytes: number;
+    ({ payload, payloadBytes, trimToFit } = await anthropicToKiro(
+      requestData,
+      conversationId,
+      "",
+      config,
+    ));
+    // Preflight: forward within Kiro's ceiling, shrink or reject above it.
+    const action = preflightPayloadAction(payloadBytes, config);
+    if (action === "trim") {
+      trimToFit();
+      didTrim = true;
+    } else if (action === "reject") {
+      throw new PayloadTooLargeError(payloadBytes, config.maxPayloadBytes);
+    }
   } catch (e) {
     if (e instanceof PayloadTooLargeError) {
       // 400, not 413: the Anthropic API reports an oversize conversation as an
@@ -327,13 +349,51 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     });
 
   audit.upstreamRequest(url, requestData.model, requestData.stream);
-  const initial = await doFetch();
+  let initial = await doFetch();
   audit.upstreamResponse(initial.status);
   if (initial.status !== 200) {
     const errorText = await initial.text();
     const enhanced = enhanceKiroErrorText(errorText);
-    audit.error("upstream non-200", { status: initial.status, reason: enhanced.reason });
-    return c.json(anthropicError("api_error", enhanced.userMessage), initial.status as any);
+    const currentBytes = checkPayloadSize(payload);
+    const action = classifyKiroRejection(enhanced, currentBytes, didTrim, config);
+    if (action === "reject-too-large") {
+      // Kiro bounced a raw oversize payload we are not allowed to shrink
+      // (auto-trim off). Return our clean "too large" message rather than
+      // Kiro's misleading "Improperly formed request." wording.
+      const message = new PayloadTooLargeError(
+        currentBytes,
+        config.maxPayloadBytes,
+      ).message;
+      audit.rejected(400, "payload too large");
+      return c.json(anthropicError("invalid_request_error", message), 400);
+    }
+    if (action !== "retry-after-trim") {
+      audit.error("upstream non-200", { status: initial.status, reason: enhanced.reason });
+      return c.json(anthropicError("api_error", enhanced.userMessage), initial.status as any);
+    }
+    // Size rejection on a payload we can shrink: trim and try once more.
+    try {
+      trimToFit();
+    } catch (e) {
+      if (e instanceof PayloadTooLargeError) {
+        audit.rejected(400, "payload too large");
+        return c.json(anthropicError("invalid_request_error", e.message), 400);
+      }
+      throw e;
+    }
+    didTrim = true;
+    audit.upstreamRequest(url, requestData.model, requestData.stream);
+    initial = await doFetch();
+    audit.upstreamResponse(initial.status);
+    if (initial.status !== 200) {
+      const retryText = await initial.text();
+      const retryEnhanced = enhanceKiroErrorText(retryText);
+      audit.error("upstream non-200 after trim", {
+        status: initial.status,
+        reason: retryEnhanced.reason,
+      });
+      return c.json(anthropicError("api_error", retryEnhanced.userMessage), initial.status as any);
+    }
   }
 
   const streamArgs = {

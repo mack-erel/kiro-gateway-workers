@@ -188,6 +188,12 @@ export interface KiroErrorInfo {
   reason: string;
   userMessage: string;
   originalMessage: string;
+  /**
+   * Kiro's generic size/shape rejection ("Improperly formed request." with a
+   * null reason). This is what an oversized payload comes back as, so callers
+   * use it to decide whether to shrink and retry.
+   */
+  malformedRequest: boolean;
 }
 
 /** Map a raw Kiro error JSON to a user-friendly message. */
@@ -196,6 +202,7 @@ export function enhanceKiroError(errorJson: Record<string, any>): KiroErrorInfo 
   const reason = errorJson["reason"] ?? "UNKNOWN";
 
   let userMessage: string;
+  let malformedRequest = false;
   if (reason === "CONTENT_LENGTH_EXCEEDS_THRESHOLD") {
     userMessage = "Model context limit reached. Conversation size exceeds model capacity.";
   } else if (reason === "MONTHLY_REQUEST_COUNT") {
@@ -206,6 +213,7 @@ export function enhanceKiroError(errorJson: Record<string, any>): KiroErrorInfo 
     originalMessage === "Improperly formed request." &&
     (reason === "UNKNOWN" || reason === "null")
   ) {
+    malformedRequest = true;
     userMessage =
       "Kiro API rejected the request. If problem persists, open issue with info and attached debug logs at:" +
       "https://github.com/jwadow/kiro-gateway/issues";
@@ -215,7 +223,7 @@ export function enhanceKiroError(errorJson: Record<string, any>): KiroErrorInfo 
     userMessage = originalMessage;
   }
 
-  return { reason, userMessage, originalMessage };
+  return { reason, userMessage, originalMessage, malformedRequest };
 }
 
 /** Try to parse a Kiro error response body (JSON) and enhance it. */
@@ -223,6 +231,11 @@ export function enhanceKiroErrorText(text: string): KiroErrorInfo {
   try {
     return enhanceKiroError(JSON.parse(text));
   } catch {
-    return { reason: "UNKNOWN", userMessage: text || "Unknown error", originalMessage: text };
+    return {
+      reason: "UNKNOWN",
+      userMessage: text || "Unknown error",
+      originalMessage: text,
+      malformedRequest: false,
+    };
   }
 }

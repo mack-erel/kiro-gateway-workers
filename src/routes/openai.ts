@@ -34,7 +34,13 @@ import {
   generateTruncationUserMessage,
 } from "../lib/truncation";
 import { enhanceKiroErrorText } from "../lib/errors";
-import { PayloadTooLargeError } from "../lib/payloadGuards";
+import {
+  PayloadTooLargeError,
+  checkPayloadSize,
+  preflightPayloadAction,
+  classifyKiroRejection,
+  type PayloadTrimStats,
+} from "../lib/payloadGuards";
 import { AuditLogger } from "../lib/auditLog";
 
 export const openaiRoutes = new Hono<{ Bindings: Env }>();
@@ -266,13 +272,24 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
 
   const conversationId = generateConversationId();
   let payload: Record<string, any>;
+  let trimToFit: () => PayloadTrimStats | null = () => null;
+  let didTrim = false;
   try {
-    ({ payload } = await buildOpenAIKiroPayload(
+    let payloadBytes: number;
+    ({ payload, payloadBytes, trimToFit } = await buildOpenAIKiroPayload(
       requestData,
       conversationId,
       "",
       config,
     ));
+    // Preflight: forward within Kiro's ceiling, shrink or reject above it.
+    const action = preflightPayloadAction(payloadBytes, config);
+    if (action === "trim") {
+      trimToFit();
+      didTrim = true;
+    } else if (action === "reject") {
+      throw new PayloadTooLargeError(payloadBytes, config.maxPayloadBytes);
+    }
   } catch (e) {
     if (e instanceof PayloadTooLargeError) {
       // 400 for the same reason as the Anthropic route: an oversize
@@ -306,16 +323,61 @@ openaiRoutes.post("/v1/chat/completions", async (c) => {
     });
 
   audit.upstreamRequest(url, requestData.model, requestData.stream);
-  const initial = await doFetch();
+  let initial = await doFetch();
   audit.upstreamResponse(initial.status);
   if (initial.status !== 200) {
     const errorText = await initial.text();
     const enhanced = enhanceKiroErrorText(errorText);
-    audit.error("upstream non-200", { status: initial.status, reason: enhanced.reason });
-    return c.json(
-      openaiError(`Upstream API error: ${enhanced.userMessage}`, "kiro_api_error", initial.status),
-      initial.status as any,
-    );
+    const currentBytes = checkPayloadSize(payload);
+    const action = classifyKiroRejection(enhanced, currentBytes, didTrim, config);
+    if (action === "reject-too-large") {
+      // Kiro bounced a raw oversize payload we are not allowed to shrink
+      // (auto-trim off). Return our clean "too large" message rather than
+      // Kiro's misleading "Improperly formed request." wording.
+      const message = new PayloadTooLargeError(
+        currentBytes,
+        config.maxPayloadBytes,
+      ).message;
+      audit.rejected(400, "payload too large");
+      return c.json(openaiError(message, "invalid_request_error", 400), 400);
+    }
+    if (action !== "retry-after-trim") {
+      audit.error("upstream non-200", { status: initial.status, reason: enhanced.reason });
+      return c.json(
+        openaiError(`Upstream API error: ${enhanced.userMessage}`, "kiro_api_error", initial.status),
+        initial.status as any,
+      );
+    }
+    // Size rejection on a payload we can shrink: trim and try once more.
+    try {
+      trimToFit();
+    } catch (e) {
+      if (e instanceof PayloadTooLargeError) {
+        audit.rejected(400, "payload too large");
+        return c.json(openaiError(e.message, "invalid_request_error", 400), 400);
+      }
+      throw e;
+    }
+    didTrim = true;
+    audit.upstreamRequest(url, requestData.model, requestData.stream);
+    initial = await doFetch();
+    audit.upstreamResponse(initial.status);
+    if (initial.status !== 200) {
+      const retryText = await initial.text();
+      const retryEnhanced = enhanceKiroErrorText(retryText);
+      audit.error("upstream non-200 after trim", {
+        status: initial.status,
+        reason: retryEnhanced.reason,
+      });
+      return c.json(
+        openaiError(
+          `Upstream API error: ${retryEnhanced.userMessage}`,
+          "kiro_api_error",
+          initial.status,
+        ),
+        initial.status as any,
+      );
+    }
   }
 
   if (requestData.stream) {

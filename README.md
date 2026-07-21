@@ -191,7 +191,8 @@ Tunables live in `wrangler.jsonc` under `vars` and are read via `loadConfig`
 | `WEB_SEARCH_ENABLED` | `true` | Auto-inject web_search tool |
 | `STREAM_DEDUP_CONSECUTIVE` | `true` | Drop consecutive identical content events in the stream parser |
 | `KIRO_MAX_PAYLOAD_BYTES` | `600000` | Payload-size guard |
-| `AUTO_TRIM_PAYLOAD` | `false` | Trim oldest history over the limit |
+| `KIRO_HARD_LIMIT_BYTES` | `615000` | Kiro's real ceiling; payloads up to here are forwarded untrimmed |
+| `AUTO_TRIM_PAYLOAD` | `true` | On a Kiro size rejection, shrink history/tool results and retry (off = clean reject) |
 | `MODEL_CACHE_TTL` | `3600` (s) | Per-session model-list cache TTL (`0` disables) |
 | `DEBUG_STREAM_EVENTS` | `false` | Audit-log each KiroEvent (Level 2) |
 | `DEBUG_BODIES` | `false` | Audit-log request / payload / response bodies (Level 3) |

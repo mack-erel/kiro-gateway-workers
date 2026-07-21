@@ -117,6 +117,7 @@ export interface Env {
   /** Inbound HTTP body cap (bytes), enforced from Content-Length in index.ts. */
   KIRO_MAX_REQUEST_BYTES?: string;
   KIRO_MAX_PAYLOAD_BYTES?: string;
+  KIRO_HARD_LIMIT_BYTES?: string;
   AUTO_TRIM_PAYLOAD?: string;
   TOOL_DESCRIPTION_MAX_LENGTH?: string;
   MODEL_CACHE_TTL?: string;
@@ -145,6 +146,7 @@ export interface Config {
   webSearchEnabled: boolean;
   dedupConsecutiveContent: boolean;
   maxPayloadBytes: number;
+  kiroHardLimitBytes: number;
   autoTrimPayload: boolean;
   toolDescriptionMaxLength: number;
   modelCacheTtlMs: number;
@@ -236,7 +238,15 @@ export function loadConfig(env: Env): Config {
     dedupConsecutiveContent: truthy(env.STREAM_DEDUP_CONSECUTIVE, true),
     // Clamp to positive: a zero/negative payload cap would fail every request.
     maxPayloadBytes: numMin(env.KIRO_MAX_PAYLOAD_BYTES, 600000, 1),
-    autoTrimPayload: truthy(env.AUTO_TRIM_PAYLOAD, false),
+    // Kiro rejects payloads over ~615KB with a misleading "Improperly formed
+    // request." Payloads between maxPayloadBytes and this ceiling are forwarded
+    // as-is (Kiro may still accept them); only above it do we shrink up front.
+    kiroHardLimitBytes: numMin(env.KIRO_HARD_LIMIT_BYTES, 615000, 1),
+    // Default on: when Kiro rejects an oversized payload, shrink history and
+    // tool results and retry rather than failing the turn. Off keeps a strict
+    // clean rejection with no trimming. Either way the current message is never
+    // reshaped, and payloads within Kiro's ceiling are forwarded untouched.
+    autoTrimPayload: truthy(env.AUTO_TRIM_PAYLOAD, true),
     toolDescriptionMaxLength: numMin(env.TOOL_DESCRIPTION_MAX_LENGTH, 10000, 1),
     // Clamp to non-negative: a negative TTL would make the cache permanently stale.
     modelCacheTtlMs: numMin(env.MODEL_CACHE_TTL, 3600, 0) * 1000,

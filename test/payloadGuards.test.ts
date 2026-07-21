@@ -3,6 +3,8 @@ import {
   checkPayloadSize,
   trimPayloadToLimit,
   PayloadTooLargeError,
+  preflightPayloadAction,
+  classifyKiroRejection,
 } from "../src/lib/payloadGuards";
 
 describe("PayloadTooLargeError", () => {
@@ -221,5 +223,64 @@ describe("trimPayloadToLimit — oversized single message", () => {
 
     expect(stats.truncatedSlots).toBe(0);
     expect(payload.conversationState.currentMessage.userInputMessage.content).toBe(before);
+  });
+});
+
+describe("preflightPayloadAction", () => {
+  const policy = {
+    maxPayloadBytes: 600_000,
+    kiroHardLimitBytes: 615_000,
+    autoTrimPayload: false,
+  };
+
+  it("forwards a payload under our cap", () => {
+    expect(preflightPayloadAction(500_000, policy)).toBe("forward");
+    expect(preflightPayloadAction(600_000, policy)).toBe("forward");
+  });
+
+  it("forwards untouched in the band between our cap and Kiro's ceiling", () => {
+    // Kiro may still accept these; trimming here would lose detail needlessly.
+    expect(preflightPayloadAction(605_000, policy)).toBe("forward");
+    expect(preflightPayloadAction(615_000, policy)).toBe("forward");
+  });
+
+  it("rejects above Kiro's ceiling when auto-trim is off", () => {
+    expect(preflightPayloadAction(620_000, policy)).toBe("reject");
+  });
+
+  it("trims above Kiro's ceiling when auto-trim is on", () => {
+    expect(
+      preflightPayloadAction(620_000, { ...policy, autoTrimPayload: true }),
+    ).toBe("trim");
+  });
+});
+
+describe("classifyKiroRejection", () => {
+  const policy = { maxPayloadBytes: 600_000, autoTrimPayload: true };
+  const sizeReject = { malformedRequest: true };
+  const otherError = { malformedRequest: false };
+
+  it("retries after trim on a size rejection when auto-trim is on", () => {
+    expect(classifyKiroRejection(sizeReject, 610_000, false, policy)).toBe("retry-after-trim");
+  });
+
+  it("returns a clean too-large rejection when auto-trim is off", () => {
+    expect(
+      classifyKiroRejection(sizeReject, 610_000, false, { ...policy, autoTrimPayload: false }),
+    ).toBe("reject-too-large");
+  });
+
+  it("passes through a non-size upstream error", () => {
+    expect(classifyKiroRejection(otherError, 610_000, false, policy)).toBe("passthrough");
+  });
+
+  it("passes through when the payload is under our cap (never a size issue)", () => {
+    // Our cap sits below Kiro's ceiling, so a sub-cap payload it rejects is
+    // some other problem — trimming would not help.
+    expect(classifyKiroRejection(sizeReject, 500_000, false, policy)).toBe("passthrough");
+  });
+
+  it("does not retry twice", () => {
+    expect(classifyKiroRejection(sizeReject, 610_000, true, policy)).toBe("passthrough");
   });
 });

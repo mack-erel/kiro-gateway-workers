@@ -12,12 +12,28 @@ import type {
   UnifiedMessage,
   UnifiedTool,
 } from "../types";
-import { checkPayloadSize, trimPayloadToLimit, PayloadTooLargeError } from "../lib/payloadGuards";
+import {
+  checkPayloadSize,
+  trimPayloadToLimit,
+  PayloadTooLargeError,
+  type PayloadTrimStats,
+} from "../lib/payloadGuards";
 import { logWarn } from "../lib/log";
 
 export interface KiroPayloadResult {
   payload: Record<string, any>;
   toolDocumentation: string;
+  /** Serialized size of `payload` as built, before any trimming. */
+  payloadBytes: number;
+  /**
+   * Last-resort shrink to fit `maxPayloadBytes`, deferred so the caller can try
+   * the untrimmed payload against Kiro first and only pay the detail loss if
+   * Kiro actually rejects it for size. No-op (returns null) when already under
+   * the cap. Throws {@link PayloadTooLargeError} if the untouchable remainder
+   * (system prompt, each body's retained head/tail, and the current message,
+   * which is never shortened) still exceeds the cap. Mutates `payload`.
+   */
+  trimToFit: () => PayloadTrimStats | null;
 }
 
 // ============================================================================
@@ -966,44 +982,43 @@ export async function buildKiroPayload(args: {
   if (history.length) payload["conversationState"]["history"] = history;
   if (profileArn) payload["profileArn"] = profileArn;
 
-  // Payload-size guard. With auto-trim on, trim oldest history to fit; with it
-  // off, reject loudly rather than forwarding an oversize payload that Kiro
-  // bounces back as a misleading "Improperly formed request." 400.
-  if (checkPayloadSize(payload) > config.maxPayloadBytes) {
-    if (config.autoTrimPayload) {
-      const stats = trimPayloadToLimit(payload, config.maxPayloadBytes, fullSystemPrompt);
-      // Auto-trim silently discards oldest history to fit Kiro's ~615 KB cap —
-      // log it so the context loss is visible (the model may otherwise seem to
-      // "forget" earlier turns with no trace).
-      if (stats.trimmed) {
-        logWarn("payload.autotrimmed", {
-          originalBytes: stats.originalBytes,
-          finalBytes: stats.finalBytes,
-          originalEntries: stats.originalEntries,
-          finalEntries: stats.finalEntries,
-          droppedEntries: stats.originalEntries - stats.finalEntries,
-        });
-      }
-      // Dropping history cannot reach the current message or the two entries it
-      // always keeps, so oversized bodies there get shortened middle-out.
-      if (stats.truncatedSlots > 0) {
-        logWarn("payload.truncated", {
-          originalBytes: stats.originalBytes,
-          finalBytes: stats.finalBytes,
-          truncatedSlots: stats.truncatedSlots,
-          truncatedBytes: stats.truncatedBytes,
-        });
-      }
-      // Still over: the untouchable remainder (system prompt plus each body's
-      // retained head and tail) exceeds the limit on its own.
-      const after = checkPayloadSize(payload);
-      if (after > config.maxPayloadBytes) {
-        throw new PayloadTooLargeError(after, config.maxPayloadBytes);
-      }
-    } else {
-      throw new PayloadTooLargeError(checkPayloadSize(payload), config.maxPayloadBytes);
+  // Payload-size enforcement is deferred to the caller (see KiroPayloadResult):
+  // it forwards the untrimmed payload to Kiro first and only invokes trimToFit
+  // if Kiro rejects it for size, so a payload Kiro would have accepted keeps its
+  // full history and tool-result detail.
+  const trimToFit = (): PayloadTrimStats | null => {
+    if (checkPayloadSize(payload) <= config.maxPayloadBytes) return null;
+    const stats = trimPayloadToLimit(payload, config.maxPayloadBytes, fullSystemPrompt);
+    // Trimming silently discards oldest history to fit Kiro's ~615 KB cap — log
+    // it so the context loss is visible (the model may otherwise seem to
+    // "forget" earlier turns with no trace).
+    if (stats.trimmed) {
+      logWarn("payload.autotrimmed", {
+        originalBytes: stats.originalBytes,
+        finalBytes: stats.finalBytes,
+        originalEntries: stats.originalEntries,
+        finalEntries: stats.finalEntries,
+        droppedEntries: stats.originalEntries - stats.finalEntries,
+      });
     }
-  }
+    // Dropping history cannot reach the current message or the two entries it
+    // always keeps, so oversized bodies there get shortened middle-out.
+    if (stats.truncatedSlots > 0) {
+      logWarn("payload.truncated", {
+        originalBytes: stats.originalBytes,
+        finalBytes: stats.finalBytes,
+        truncatedSlots: stats.truncatedSlots,
+        truncatedBytes: stats.truncatedBytes,
+      });
+    }
+    // Still over: the untouchable remainder (system prompt plus each body's
+    // retained head and tail) exceeds the limit on its own.
+    const after = checkPayloadSize(payload);
+    if (after > config.maxPayloadBytes) {
+      throw new PayloadTooLargeError(after, config.maxPayloadBytes);
+    }
+    return stats;
+  };
 
-  return { payload, toolDocumentation };
+  return { payload, toolDocumentation, payloadBytes: checkPayloadSize(payload), trimToFit };
 }
