@@ -4,6 +4,7 @@
   "description": "OpenAI/Anthropic-compatible proxy gateway for the Kiro API (AWS CodeWhisperer backend), running on Cloudflare Workers + Hono. API-key passthrough only.",
   "type": "module",
   "private": true,
+  "packageManager": "pnpm@11.9.0",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
