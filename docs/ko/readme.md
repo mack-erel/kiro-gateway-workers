@@ -59,7 +59,7 @@ OpenAI 엔드포인트는 `Authorization: Bearer ksk_…`, Anthropic 엔드포�
 ## 설정
 
 ```bash
-npm install
+pnpm install
 
 # 로컬 개발
 npm run dev

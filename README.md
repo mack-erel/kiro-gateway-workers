@@ -58,7 +58,7 @@ All `/v1/*` endpoints require a `ksk_…` key. Without one, the gateway returns 
 ## Setup
 
 ```bash
-npm install
+pnpm install
 
 # Local dev
 npm run dev
